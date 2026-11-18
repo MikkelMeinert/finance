@@ -177,8 +177,11 @@ function _split() {
 }
 const TX = () => { _split(); return _tx; };
 const UPCOMING = () => { _split(); return _up; };
-/* Some banks send no counterparty name, only a text. The name shown and grouped on is whichever exists. */
-const nameOf = t => String((t && (t.cp || t.text)) || "").trim();
+/* Some banks send no counterparty name, only a text. The name shown and grouped on is whichever exists.
+   Card payments arrive as "DK-NOTA<receipt> SHOP" or "Forretning: SHOP"; the label in front says nothing about the shop
+   and the receipt number changes every time, so both are taken off before a text is shown, grouped or matched by a rule. */
+const bare = s => String(s == null ? "" : s).replace(/^(?:DK-NOTA ?\S+|Forretning:)\s+(?=\S)/i, "").trim();
+const nameOf = t => String((t && (t.cp || bare(t.text))) || "").trim();
 
 /* ---------- state shape ---------- */
 function normalise(s) {
@@ -197,11 +200,14 @@ const WEEK_KINDS = ["variable", "protected"];          // protected budgets coun
 const merchantKey = t => nameOf(t).toLowerCase().replace(/[0-9]/g, "").replace(/\s+/g, " ").trim();
 const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const _re = new Map();
-function ruleRe(p) { if (!_re.has(p)) { try { _re.set(p, new RegExp(p, "i")); } catch (e) { _re.set(p, null); } } return _re.get(p); }
+/* \b in JavaScript only knows a-z, so "\bblå\b" would never match. Rules get a word boundary that knows æ, ø, å, ü and friends. */
+const _W = "[A-Za-z0-9_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u00FF]", _B = "(?:(?<=" + _W + ")(?!" + _W + ")|(?<!" + _W + ")(?=" + _W + "))";
+const ruleSource = p => String(p).replace(/\\\\|\\b/g, m => m === "\\b" ? _B : m);
+function ruleRe(p) { if (!_re.has(p)) { try { _re.set(p, new RegExp(ruleSource(p), "i")); } catch (e) { _re.set(p, null); } } return _re.get(p); }
 function catOf(t) {
   if (state.overrides[t.id]) return state.overrides[t.id];
-  const hay = [t.cp, t.text].filter(Boolean).join(" ");
-  for (const r of state.rules) { const re = ruleRe(r.pattern); if (re && re.test(hay)) return r.cat; }
+  const hay = [t.cp, bare(t.text)].filter(Boolean).join(" ");
+  for (const r of state.rules) { if (r.acct && r.acct !== t.acct) continue; const re = ruleRe(r.pattern); if (re && re.test(hay)) return r.cat; }
   return null;
 }
 /* Spending is net within spending categories (a friend paying back on MobilePay reduces it).
@@ -261,7 +267,8 @@ function sharedMonth(mk) {
   const a = mk + "-01", b = mk + "-" + pad(daysIn(mk));
   const tx = TX().filter(t => t.acct === "shared" && inRange(t, a, b));
   const lines = {}; tx.forEach(t => { const c = catOf(t) || "_none"; lines[c] = (lines[c] || 0) + t.amount; });
-  const costs = -sum(tx.filter(t => t.amount < 0), t => t.amount);
+  const moves = t => ["sharedin", "flow"].includes(kindOf(catOf(t)));      // money between the owners is not a cost of the home
+  const costs = -sum(tx.filter(t => t.amount < 0 && !moves(t)), t => t.amount);
   const partner = lines.partner || 0, tenant = lines.tenant || 0;
   return { tx, lines, costs, partner, tenant, share: Math.max(0, (costs - partner - tenant) / 2) };
 }
@@ -440,5 +447,5 @@ function validateState(s) {
 }
 
 /* Node: everything by name, plus live views of the context. */
-if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
+if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
   state: { get: () => state }, DATA: { get: () => DATA }, TODAY: { get: () => TODAY } });

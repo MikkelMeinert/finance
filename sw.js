@@ -5,7 +5,7 @@
    - Never touches another origin: GitHub API calls (sync) must never be cached or answered from cache.
    - Never caches a response that isn't ok (a cached 401 once froze the training app's sync).
    Bump CACHE together with APP_VERSION in index.html on every deploy; a test checks they match. */
-const CACHE = "finance-0.3.0";
+const CACHE = "finance-0.3.1";
 const ASSETS = ["./", "index.html", "core.js", "vault.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png", "fonts/schibsted-grotesk-latin.woff2"];
 
 self.addEventListener("install", (e) => {

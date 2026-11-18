@@ -265,7 +265,7 @@ textarea.report{width:100%;min-height:260px;border-radius:var(--r-md);border:1px
    holds no personal data: a test checks this file against the seed.
    Until data is connected the app runs on generated example data.
 ===================================================================== */
-const APP_VERSION = "0.3.0";
+const APP_VERSION = "0.3.1";
 VERSION = APP_VERSION;                                   // core.js and vault.js are loaded above; they hold the logic and the storage
 TODAY = (() => { if (window.FIN_TODAY) return parseD(window.FIN_TODAY); const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); })();
 MODE = readMode();
