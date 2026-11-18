@@ -1,11 +1,12 @@
 /* Offline shell for finance.
-   - The app page: network first (a new deploy shows on the next open), cached copy offline.
+   - The app page and its two scripts (core.js, vault.js): network first, so a new deploy shows on the next open
+     and the page never runs with scripts from an older version; cached copies offline.
    - Its own static files (font, icons, manifest): cache first.
    - Never touches another origin: GitHub API calls (sync) must never be cached or answered from cache.
    - Never caches a response that isn't ok (a cached 401 once froze the training app's sync).
    Bump CACHE together with APP_VERSION in index.html on every deploy; a test checks they match. */
-const CACHE = "finance-0.2.1";
-const ASSETS = ["./", "index.html", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png", "fonts/schibsted-grotesk-latin.woff2"];
+const CACHE = "finance-0.3.0";
+const ASSETS = ["./", "index.html", "core.js", "vault.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png", "fonts/schibsted-grotesk-latin.woff2"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -26,14 +27,15 @@ self.addEventListener("fetch", (e) => {
   if (/\/(callback\.(html|js)|privacy\.html|terms\.html)$/.test(new URL(req.url).pathname)) return;
 
   const isPage = req.mode === "navigate" || (req.headers.get("accept") || "").includes("text/html");
-  if (isPage) {
+  const isCode = /\/(core|vault)\.js$/.test(new URL(req.url).pathname);
+  if (isPage || isCode) {
     e.respondWith(
       fetch(req.url, { cache: "no-cache", credentials: "same-origin" })
         .then((res) => {
-          if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put("index.html", copy)); }
+          if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(isPage ? "index.html" : req, copy)); }
           return res;
         })
-        .catch(() => caches.match("index.html").then((r) => r || caches.match(req)))
+        .catch(() => (isPage ? caches.match("index.html") : caches.match(req)).then((r) => r || caches.match(req)))
     );
     return;
   }
