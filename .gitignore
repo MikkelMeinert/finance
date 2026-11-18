@@ -1,0 +1,10 @@
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+*.enc
+*.seed.json
+seed/
+node_modules/
+.checkin/
