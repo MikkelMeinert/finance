@@ -377,7 +377,7 @@ function buildWeeklyReport() {
   L.push("## Weeks", ...weeksTable(from), "");
   L.push(`This week so far: ${krN(w.spent)} of ${krN(w.allowance)} kr., ${krN(w.carried)} carried in, ${w.pending} pending card payments.`, "");
   const soon = upcomingWithin(7);
-  L.push(`Scheduled by the bank in the next 7 days: ${soon.length ? soon.length + " payments, " + krN(-sum(soon, t => t.amount)) + " kr." : "none"}.`, "");
+  L.push(`Scheduled by the bank in the next 7 days: ${soon.length ? soon.length + (soon.length > 1 ? " payments, " : " payment, ") + krN(-sum(soon, t => t.amount)) + " kr" : "none"}.`, "");
   L.push("## Unusual", ...(unus.length ? unus.map(u => `- ${u.t.date} ${nameOf(u.t)} ${krN(-u.t.amount)} kr.: ${u.why}`) : ["- none"]), ...newRec.map(r => `- new recurring: ${r.name} ${krN(r.amount)} kr.`), "");
   const unc = TX().filter(t => t.date >= a && spendOf(t, SPEND_KINDS) > 0 && catOf(t) === null);
   L.push("## Uncategorised since last time", ...(unc.length ? unc.map(t => `- ${t.date} ${nameOf(t)} ${krN(-t.amount)} kr.`) : ["- none"]), "");
@@ -386,22 +386,26 @@ function buildWeeklyReport() {
   return L.join("\n");
 }
 function buildMonthlyReview() {
-  const from = lastCheckin("monthly"), m0 = monthKey(TODAY), first = (TX().map(t => t.date).sort()[0] || ymd(TODAY)).slice(0, 7);
+  const from = lastCheckin("monthly"), m0 = monthKey(TODAY), firstDay = TX().map(t => t.date).sort()[0] || ymd(TODAY), first = firstDay.slice(0, 7);
   const months = []; for (let i = 6; i >= 0; i--) { const m = shiftMonth(m0, -i); if (m >= first) months.push(m); }
-  const full = months.filter(m => m !== m0), a = from || (months[0] + "-01");
+  /* A month counts as full only if the data covers it from the 1st: the month the accounts were opened is shown, not averaged. */
+  const partial = m => m + "-01" < firstDay, full = months.filter(m => m !== m0 && !partial(m)), a = from || (months[0] + "-01");
+  const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
   const L = reportHeader("Monthly review", from);
   L.push("Please look for: where spending drifts from plan and why, what changed since last time, what the savings trend means for the buffer target and the 5th floor, and one or two adjustments worth making (plans, rules, caps). Protected budgets (sport, cycling, travel) are kept by choice.", "");
   // categories by month
   const spends = Object.fromEntries(months.map(m => [m, monthSpend(m, m === m0 ? TODAY.getDate() : undefined)]));
   L.push(`## Spending by category (${months.map(monthName).join(", ")}${months.includes(m0) ? "; current month to day " + TODAY.getDate() : ""})`);
-  L.push(["Category", "kind", "plan", ...months.map(m => m.slice(5)), `avg ${full.length} full months`, "vs plan", "value"].join(" | "));
+  L.push(["Category", "kind", "plan", ...months.map(m => m.slice(5) + (partial(m) ? "*" : "")), `avg ${plural(full.length, "full month")}`, "vs plan", "value"].join(" | "));
   const rat = latestRatings();
   state.categories.filter(c => SPEND_KINDS.includes(c.kind)).forEach(c => {
     const vals = months.map(m => spends[m].by[c.id] || 0), avg = full.length ? sum(full, m => spends[m].by[c.id] || 0) / full.length : 0;
     L.push([c.name, c.kind, krN(c.plan || 0), ...vals.map(krN), krN(avg), pct(avg, c.plan || 0), rat[c.id] || "-"].join(" | "));
   });
   L.push(["Uncategorised", "-", "-", ...months.map(m => krN(spends[m].by._none || 0)), "", "", ""].join(" | "));
-  L.push(["Total", "", krN(planTotal()), ...months.map(m => krN(spends[m].total)), krN(full.length ? sum(full, m => spends[m].total) / full.length : 0), pct(full.length ? sum(full, m => spends[m].total) / full.length : 0, planTotal()), ""].join(" | "), "");
+  L.push(["Total", "", krN(planTotal()), ...months.map(m => krN(spends[m].total)), krN(full.length ? sum(full, m => spends[m].total) / full.length : 0), pct(full.length ? sum(full, m => spends[m].total) / full.length : 0, planTotal()), ""].join(" | "));
+  if (months.some(partial)) L.push(`* Part of a month: the data starts ${firstDay}, so that month is left out of the average and the table below.`);
+  L.push("");
   // money flow per month
   L.push("## Money in and out of the lønkonto per month");
   L.push("Month | salary | other in | spending | housing share | savings | own transfers | net change | buffer day before salary");
@@ -415,12 +419,12 @@ function buildMonthlyReview() {
   const per = TX().filter(t => t.date >= a && spendOf(t, SPEND_KINDS) > 0);
   const byM = {}; per.forEach(t => { const k = nameOf(t); byM[k] = byM[k] || { n: 0, s: 0, c: catOf(t) }; byM[k].n++; byM[k].s += -t.amount; });
   const top = Object.entries(byM);
-  L.push("## Top merchants since " + a + " (by amount)", ...top.sort((x, y) => y[1].s - x[1].s).slice(0, 12).map(([k, v]) => `- ${k} (${catName(v.c)}): ${krN(v.s)} kr. over ${v.n} purchases`), "");
-  L.push("## Most frequent", ...top.sort((x, y) => y[1].n - x[1].n).slice(0, 8).map(([k, v]) => `- ${k}: ${v.n} purchases, ${krN(v.s)} kr.`), "");
+  L.push("## Top merchants since " + a + " (by amount)", ...top.sort((x, y) => y[1].s - x[1].s).slice(0, 12).map(([k, v]) => `- ${k} (${catName(v.c)}): ${krN(v.s)} kr. over ${plural(v.n, "purchase")}`), "");
+  L.push("## Most frequent", ...top.sort((x, y) => y[1].n - x[1].n).slice(0, 8).map(([k, v]) => `- ${k}: ${plural(v.n, "purchase")}, ${krN(v.s)} kr.`), "");
   // home, recurring, subs
   L.push("## Home (shared account)", ...full.slice(-3).map(m => { const s = sharedMonth(m); return `- ${m}: costs ${krN(s.costs)}, your share ${krN(s.share)}`; }), "");
   const rec = recurring();
-  L.push("## Recurring charges", ...rec.map(r => `- ${r.name} (${catName(r.cat)}): ${krN(r.amount)} kr. ${r.cadence}${r.isNew ? ", NEW" : ""}${state.subs[r.key] ? ", " + state.subs[r.key].status + (state.subs[r.key].used && state.subs[r.key].used.length ? ", last used " + state.subs[r.key].used.slice().sort().pop() : ", never marked used") : ""}`), "");
+  L.push("## Recurring charges", ...(rec.length ? [] : ["- none found yet"]), ...rec.map(r => `- ${r.name} (${catName(r.cat)}): ${krN(r.amount)} kr. ${r.cadence}${r.isNew ? ", NEW" : ""}${state.subs[r.key] ? ", " + state.subs[r.key].status + (state.subs[r.key].used && state.subs[r.key].used.length ? ", last used " + state.subs[r.key].used.slice().sort().pop() : ", never marked used") : ""}`), "");
   // decisions
   const dec = state.wishlist.filter(w => w.decided && w.decided >= a);
   L.push("## Wishlist decisions since " + a, ...(dec.length ? dec.map(w => `- ${w.name} ${krN(w.price)} kr.: ${w.status}`) : ["- none"]), "");

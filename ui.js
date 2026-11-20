@@ -10,7 +10,7 @@
    holds no personal data: a test checks this file against the seed.
    Until data is connected the app runs on generated example data.
 ===================================================================== */
-const APP_VERSION = "0.4.0";
+const APP_VERSION = "0.4.1";
 VERSION = APP_VERSION;                                   // core.js and vault.js are loaded above; they hold the logic and the storage
 TODAY = (() => { if (window.FIN_TODAY) return parseD(window.FIN_TODAY); const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); })();
 MODE = readMode();
@@ -534,8 +534,9 @@ function deviceBox() {
       <div class="kv"><span class="k">Key fingerprint</span><span class="v">${esc(m.fingerprint || "")}</span></div>
       <div class="kv"><span class="k">Last sync</span><span class="v">${esc(when)}${m.dirty ? "; changes waiting" : ""}</span></div>
       ${m.error ? `<div class="kv"><span class="k">Last attempt</span><span class="v">${esc(syncText({ code: m.error }))}</span></div>` : ""}
-      ${m.tokenUntil ? `<div class="kv"><span class="k">Token expires</span><span class="v">${esc(fmtDay(parseD(m.tokenUntil)))} ${esc(m.tokenUntil.slice(0, 4))}</span></div>` : ""}
+      <div class="kv"><span class="k"><label for="dUntil">Token expires</label></span><span class="v"><input id="dUntil" type="date" value="${esc(/^\d{4}-\d{2}-\d{2}$/.test(m.tokenUntil || "") ? m.tokenUntil : "")}" style="width:auto;padding:4px 8px"></span></div>
     </div>
+    <span class="note">The browser can't read the expiry from GitHub, so enter the date GitHub showed when you made this device's token. A reminder appears 14 days before.</span>
     <div class="btns" style="margin-top:8px"><button class="btn sm" id="dSync">Sync now</button><button class="btn line sm" id="dDisconnect">Disconnect this device</button></div></div>`;
 }
 function afterSync(r, quiet) {
@@ -552,6 +553,13 @@ function bindDeviceBox(sh) {
       msg.textContent = "Key " + print + " opened. Fetching your data.";
       const r = await syncAll(); closeSheet(); afterSync(r);
     } catch (e) { c.disabled = false; msg.textContent = syncText(e); }
+  };
+  const u = sh.querySelector("#dUntil");
+  if (u) u.onchange = () => {
+    const v = u.value, m = syncMeta();
+    if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) return;
+    if (v) m.tokenUntil = v; else delete m.tokenUntil;
+    writeJSON(KEY_SYNC, m); setDataPill(); toast(v ? "Token date saved" : "Token date cleared");
   };
   if (s) s.onclick = async () => { s.disabled = true; msg.textContent = "Syncing."; const r = await syncAll(); closeSheet(); afterSync(r); };
   if (d) d.onclick = () => { if (d.dataset.armed) { disconnectDevice(); DATA = loadData(); closeSheet(); render(); toast("Disconnected. The token and key are removed from this device."); return; } d.dataset.armed = "1"; d.textContent = "Tap again to disconnect"; };
