@@ -10,7 +10,7 @@
    holds no personal data: a test checks this file against the seed.
    Until data is connected the app runs on generated example data.
 ===================================================================== */
-const APP_VERSION = "0.4.1";
+const APP_VERSION = "0.4.2";
 VERSION = APP_VERSION;                                   // core.js and vault.js are loaded above; they hold the logic and the storage
 TODAY = (() => { if (window.FIN_TODAY) return parseD(window.FIN_TODAY); const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); })();
 MODE = readMode();
@@ -22,12 +22,17 @@ const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&a
 const $ = s => document.querySelector(s);
 const view = $("#view");
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 2400); }
+/* The page stays where it was while a sheet is open and after it closes (a phone may scroll when the sheet takes focus). */
 function openSheet(html, bind) {
-  const sh = $("#sheet"); sh.innerHTML = '<div class="grab"></div>' + html; $("#scrim").hidden = false;
+  const sh = $("#sheet"); if ($("#scrim").hidden) openSheet.y = window.scrollY;
+  sh.innerHTML = '<div class="grab"></div>' + html; $("#scrim").hidden = false;
   if (bind) bind(sh);
   const f = sh.querySelector("input,button"); if (f) f.focus({ preventScroll: true });
 }
-function closeSheet() { $("#scrim").hidden = true; $("#sheet").innerHTML = ""; }
+function closeSheet() {
+  const was = !$("#scrim").hidden; $("#scrim").hidden = true; $("#sheet").innerHTML = "";
+  if (was && openSheet.y != null && window.scrollY !== openSheet.y) window.scrollTo(0, openSheet.y);
+}
 $("#scrim").addEventListener("click", e => { if (e.target.id === "scrim") closeSheet(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#scrim").hidden) closeSheet(); });
 const sharedLabel = () => esc(state.labels.shared);
@@ -66,21 +71,33 @@ function openTx(id) {
       <div class="kv"><span class="k">Bank text</span><span class="v">${esc(t.text)}</span></div>
     </div>
     <div class="field"><label>Category</label><div class="catpick" id="pick">${choices.map(c => `<button data-c="${c.id}" class="${c.id === cur ? "on" : ""}">${esc(c.name)}</button>`).join("")}</div></div>
-    <label class="check"><input type="checkbox" id="always"><span>Always use this category for <b>${esc(nameOf(t))}</b><br><span class="muted small">Adds a rule. Earlier and later transactions from this merchant follow it.</span></span></label>
+    <label class="check"><input type="checkbox" id="always"><span>Always use this category for this merchant<br><span class="muted small">Adds a rule. Earlier and later transactions that match follow it.</span></span></label>
+    <div class="field" id="ruleBox" hidden><label for="ruleIn">Names starting with</label>
+      <input id="ruleIn" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(ruleStem(nameOf(t)))}">
+      <span class="note" id="ruleCount" aria-live="polite"></span></div>
     <div class="btns"><button class="btn" id="txSave">Save category</button><button class="btn quiet" id="txCancel">Cancel</button></div>`, sh => {
     let sel = cur;
     sh.querySelectorAll("#pick button").forEach(b => b.onclick = () => { sel = b.dataset.c; sh.querySelectorAll("#pick button").forEach(x => x.classList.toggle("on", x === b)); });
     sh.querySelector("#txCancel").onclick = closeSheet;
+    const al = sh.querySelector("#always"), box = sh.querySelector("#ruleBox"), rin = sh.querySelector("#ruleIn"), rc = sh.querySelector("#ruleCount");
+    const pat = () => { const v = rin.value.trim(); return v.length >= 3 ? "^" + escRe(v) : null; };
+    const count = () => {
+      const p = pat(); if (!p) { rc.textContent = "Type at least 3 letters."; return; }
+      const m = ruleMatches(p, t.acct);
+      rc.textContent = `Catches ${m.n} transaction${m.n === 1 ? "" : "s"} on this account` + (m.names.length ? ": " + m.names.join(", ") + (m.more ? ` and ${m.more} more` : "") : "") + ".";
+    };
+    al.onchange = () => { box.hidden = !al.checked; if (al.checked) count(); };
+    rin.oninput = count;
     sh.querySelector("#txSave").onclick = () => {
       if (!sel) { closeSheet(); return; }
-      const always = sh.querySelector("#always").checked;
+      const always = al.checked;
       if (always) {
-        const p = "^" + escRe(nameOf(t));
-        state.rules = state.rules.filter(r => r.pattern !== p);
-        state.rules.unshift({ id: "u-" + Date.now(), pattern: p, cat: sel, created: ymd(TODAY) });
+        const p = pat(); if (!p) { count(); rin.focus(); return; }
+        state.rules = state.rules.filter(r => !(r.pattern === p && (r.acct || t.acct) === t.acct));
+        state.rules.unshift({ id: "u-" + Date.now(), pattern: p, cat: sel, acct: t.acct, created: ymd(TODAY) });
         delete state.overrides[t.id];
       } else state.overrides[t.id] = sel;
-      save(); closeSheet(); render(); toast(always ? "Saved. Rule added for " + nameOf(t) : "Category saved");
+      save(); closeSheet(); rerender(); toast(always ? "Saved. Rule added for names starting with " + rin.value.trim() : "Category saved");
     };
   });
 }
@@ -93,10 +110,12 @@ function headerPills() {
   else if (feed && feed.at && daysBetween(parseD(feed.at.slice(0, 10)), TODAY) > 2) p.push(`<span class="pill ochre"><span class="dot ochre"></span>No bank feed since ${esc(fmtDay(parseD(feed.at.slice(0, 10))))}</span>`);
   if (meta.tokenUntil) { const left = daysBetween(TODAY, parseD(meta.tokenUntil)); if (left <= 14) p.push(`<span class="pill ochre"><span class="dot ochre"></span>This device's token expires in ${Math.max(0, left)} days</span>`); }
   if (DATA.consentUntil) { const left = daysBetween(TODAY, parseD(DATA.consentUntil)); if (left <= 14) p.push(`<span class="pill ochre"><span class="dot ochre"></span>Renew bank access in ${Math.max(0, left)} days</span>`); }
-  const unc = TX().filter(t => t.acct === "own" && t.amount < 0 && catOf(t) === null && t.date >= ymd(addDays(TODAY, -31))).length;
-  if (unc) p.push(`<a class="pill" href="#month"><span class="dot muted"></span>${unc} to categorise</a>`);
+  const unc = toCategorise().length;
+  if (unc) p.push(`<a class="pill" href="#month/todo"><span class="dot muted"></span>${unc} to categorise</a>`);
   return p.length ? `<div class="pills">${p.join("")}</div>` : "";
 }
+/* Money out without a category, on any account and in any month, newest first. */
+const toCategorise = () => TX().filter(t => t.amount < 0 && catOf(t) === null).sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
 function emptyNote() { return MODE === "yours" && !TX().length ? `<p class="empty">No bank data yet. Connect this device in Settings and the bank feed fills this in; your plans and rules are already loaded.</p>` : ""; }
 
 function renderWeek() {
@@ -135,10 +154,11 @@ function renderWeek() {
     <div class="chips">${prot}</div>
   </section>
   <section class="sec">
-    <div class="sec-h"><h2>Latest</h2><a class="aside" href="#month">All of ${MONTHS[TODAY.getMonth()]}</a></div>
+    <div class="sec-h"><h2>Latest</h2><a class="aside" href="#month/tx" id="allMonth">All of ${MONTHS[TODAY.getMonth()]}</a></div>
     ${latest.length ? `<div class="list">${latest.map(txRow).join("")}</div>` : `<p class="empty">No transactions in the last seven days.</p>`}
   </section>`;
   bindTxRows(view);
+  $("#allMonth").onclick = () => { monthSel = monthKey(TODAY); };
 }
 
 let monthSel = monthKey(TODAY);
@@ -160,19 +180,20 @@ function renderMonth() {
   const groups = [["Everyday", "variable"], ["Protected", "protected"], ["Fixed", "fixed"]];
   const cats = groups.map(([h, k]) => `<div class="group-h">${h}</div>` + rowsData.filter(r => r.c.kind === k).map(catRow).join("")).join("");
   const rec = recurring(), sh = sharedMonth(mk), up = upcomingWithin(31);
-  const uncTx = ms.tx.filter(t => catOf(t) === null && t.amount < 0).sort((a, b) => a.date < b.date ? 1 : -1);
+  const todo = toCategorise(), allTx = ms.tx.slice().sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
   view.innerHTML = `${headerPills()}${emptyNote()}
   <div class="monthnav"><h2>${fmtMonth(mk)}</h2>
     <button class="navbtn" id="mPrev" aria-label="Previous month" ${prev < first ? "disabled" : ""}>‹</button>
     <button class="navbtn" id="mNext" aria-label="Next month" ${cur ? "disabled" : ""}>›</button></div>
   <p class="bignote"><b>${kr(ms.total)}</b> spent of ${kr(plan)} planned${cur ? `, day ${upTo} of ${daysIn(mk)}` : ""}. Last month ${kr(lm.total)}</p>
   <div class="chart" id="paceChart"></div>
+  ${todo.length ? `<section class="sec" id="a-todo"><div class="sec-h"><h2>To categorise</h2><span class="aside">${todo.length}, all months</span></div>
+    <div class="list">${todo.map(txRow).join("")}</div><p class="note">Counted as everyday until you pick a category. Tap a row.</p></section>` : ""}
   <section class="sec">
-    <div class="sec-h"><h2>By category</h2><span class="aside">Tap a line to change its plan</span></div>
-    <div class="cats">${cats}${unc ? `<div class="group-h">Not categorised</div><div class="cat" style="cursor:default"><span class="n">Uncategorised</span><span class="v">${krN(unc)}</span><span class="lm">Counted as everyday until you pick a category below.</span></div>` : ""}</div>
+    <div class="sec-h"><h2>By category</h2><span class="aside">Tap a line for its plan and transactions</span></div>
+    <div class="cats">${cats}${unc ? `<div class="group-h">Not categorised</div><div class="cat" style="cursor:default"><span class="n">Uncategorised</span><span class="v">${krN(unc)}</span><span class="lm">Counted as everyday until you pick a category under To categorise.</span></div>` : ""}</div>
     <div class="legend-inline"><span><i class="sw" style="background:var(--accent)"></i>Spent</span><span><i class="sw" style="background:var(--ochre)"></i>Protected, or past the plan</span><span><i class="sw" style="background:var(--ink);width:2px;height:12px"></i>Plan</span></div>
   </section>
-  ${uncTx.length ? `<section class="sec"><div class="sec-h"><h2>Pick a category</h2><span class="aside">${uncTx.length} this month</span></div><div class="list">${uncTx.map(txRow).join("")}</div></section>` : ""}
   <section class="sec">
     <div class="sec-h"><h2>Your share of the home</h2><a class="aside" href="#shared">${sharedLabel()}</a></div>
     <div class="panel"><div class="kv"><span class="k">Costs on the shared account</span><span class="v">${kr(sh.costs)}</span></div>
@@ -186,7 +207,9 @@ function renderMonth() {
     <div class="sec-h"><h2>Recurring charges</h2><span class="aside">${kr(sum(rec, r => r.perMonth))} a month</span></div>
     ${rec.length ? `<div class="list">${rec.map(r => `<div class="item"><span class="main"><span class="name">${esc(r.name)} ${r.isNew ? '<span class="tag ochre">New</span>' : ""}</span>
       <span class="sub">${esc(catName(r.cat))}${r.acct === "shared" ? ", shared account" : ""}, ${r.cadence}, since ${esc(fmtDay(parseD(r.first)))}</span></span><span class="amt">${krN(r.amount)}</span></div>`).join("")}</div>` : `<p class="empty">None found yet. Recurring charges show up after two or three months of bank data.</p>`}
-  </section>`;
+  </section>
+  <section class="sec" id="a-tx"><div class="sec-h"><h2>Transactions</h2><span class="aside">${allTx.length} on ${esc(state.labels.own)}</span></div>
+    ${allTx.length ? `<div class="list">${allTx.map(txRow).join("")}</div>` : `<p class="empty">No transactions this month.</p>`}</section>`;
   $("#mPrev").onclick = () => { monthSel = prev; renderMonth(); };
   $("#mNext").onclick = () => { monthSel = shiftMonth(mk, 1); renderMonth(); };
   view.querySelectorAll("[data-plan]").forEach(b => b.onclick = () => openPlan(b.dataset.plan));
@@ -198,12 +221,16 @@ function openPlan(id) {
   const why = c.kind === "protected" ? "A protected budget. It counts in the week like everyday spending, but it is never a cut candidate."
     : c.kind === "fixed" ? "Fixed charges are planned monthly and don't count against the week."
     : "Everyday and protected plans set the weekly number: their sum × 12 ÷ 52.";
+  const list = monthSpend(monthSel).tx.filter(t => catOf(t) === id).sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
   openSheet(`<h3>${esc(c.name)}</h3>
     <div class="field"><label for="planIn">Monthly plan (kr.)</label><input id="planIn" type="number" inputmode="numeric" min="0" step="50" value="${c.plan || 0}"></div>
     <p class="note">${why}</p>
-    <div class="btns"><button class="btn" id="pSave">Save plan</button><button class="btn quiet" id="pCancel">Cancel</button></div>`, sh => {
+    <div class="btns"><button class="btn" id="pSave">Save plan</button><button class="btn quiet" id="pCancel">Cancel</button></div>
+    <div class="field"><label>${esc(fmtMonth(monthSel))}: ${list.length} transaction${list.length === 1 ? "" : "s"}</label>
+      ${list.length ? `<div class="list">${list.map(txRow).join("")}</div>` : `<p class="note">None this month.</p>`}</div>`, sh => {
     sh.querySelector("#pCancel").onclick = closeSheet;
-    sh.querySelector("#pSave").onclick = () => { c.plan = Math.max(0, Math.round(Number(sh.querySelector("#planIn").value) || 0)); save(); closeSheet(); render(); toast("Plan saved"); };
+    bindTxRows(sh);
+    sh.querySelector("#pSave").onclick = () => { c.plan = Math.max(0, Math.round(Number(sh.querySelector("#planIn").value) || 0)); save(); closeSheet(); rerender(); toast("Plan saved"); };
   });
 }
 /* Cumulative spending this month vs last month vs the plan spread evenly. One y-axis. */
@@ -245,12 +272,13 @@ function paceChart(el, mk, upTo, prevMk, plan) {
 function renderShared() {
   const mk = monthSel, sh = sharedMonth(mk), hp = state.housingPlan || {}, L = state.labels;
   const line = (id, sign, planned) => `<div class="kv"><span class="k">${esc(catName(id))}</span><span class="v">${kr((sh.lines[id] || 0) * sign)}${planned ? `<br><span class="muted small">plan ${kr(planned)}</span>` : ""}</span></div>`;
-  const tx = sh.tx.slice().sort((a, b) => a.date < b.date ? 1 : -1);
+  const tx = sh.tx.slice().sort((a, b) => a.date < b.date ? 1 : -1), shUnc = -sum(sh.tx.filter(t => t.amount < 0 && catOf(t) === null), t => t.amount);
   view.innerHTML = `
   <div class="monthnav"><h2>${esc(L.shared)}</h2><a class="linkbtn" href="#month">Back to month</a></div>
   <p class="bignote">${fmtMonth(mk)}.${DATA.balances ? ` Balance today <b>${kr(DATA.balances.shared)}</b>` : ""}</p>
   <section class="sec"><div class="sec-h"><h2>Costs</h2><span class="aside">${kr(sh.costs)}</span></div>
-    <div class="panel">${line("boligafgift", -1, hp.boligafgift)}${line("bills", -1, hp.bills)}${line("loan", -1, hp.loan)}</div></section>
+    <div class="panel">${state.categories.filter(c => c.kind === "shared" && (["boligafgift", "bills", "loan"].includes(c.id) || sh.lines[c.id] || hp[c.id])).map(c => line(c.id, -1, hp[c.id])).join("")}
+    ${shUnc ? `<div class="kv"><span class="k"><a href="#month/todo">Not categorised</a></span><span class="v">${kr(shUnc)}</span></div>` : ""}</div></section>
   <section class="sec"><div class="sec-h"><h2>Money in</h2></div>
     <div class="panel">${line("contrib", 1)}
     <div class="kv"><span class="k">${esc(L.partner)}</span><span class="v">${sh.partner ? kr(sh.partner) : state.savings.partnerFrom ? "From " + esc(fmtMonth(state.savings.partnerFrom.slice(0, 7))) : "None yet"}</span></div>
@@ -312,7 +340,7 @@ function renderSavings() {
     sh.querySelector("#nSave").onclick = () => {
       const mk = monthKey(TODAY), v = id => Math.max(0, Math.round(Number(sh.querySelector(id).value) || 0));
       state.nordnet = state.nordnet.filter(x => x.month !== mk).concat([{ month: mk, ask: v("#nAsk"), depot: v("#nDep"), askLeft: v("#nLeft") }]);
-      save(); closeSheet(); render(); toast("Nordnet values saved");
+      save(); closeSheet(); rerender(); toast("Nordnet values saved");
     };
   });
   $("#giftBtn").onclick = () => openSheet(`<h3>Log a gift</h3>
@@ -324,7 +352,7 @@ function renderSavings() {
     sh.querySelector("#gSave").onclick = () => {
       const a = Math.round(Number(sh.querySelector("#gAmt").value) || 0); if (a <= 0) { sh.querySelector("#gAmt").focus(); return; }
       state.gifts.push({ giver: sh.querySelector("#gGiver").value, amount: a, date: sh.querySelector("#gDate").value || ymd(TODAY) });
-      save(); closeSheet(); render(); toast("Gift logged");
+      save(); closeSheet(); rerender(); toast("Gift logged");
     };
   });
   $("#f5Btn").onclick = () => openSheet(`<h3>5th floor</h3>
@@ -335,7 +363,7 @@ function renderSavings() {
     sh.querySelector("#fSave").onclick = () => {
       state.savings.fitoutShare = Math.max(0, Math.round(Number(sh.querySelector("#fNeed").value) || 0));
       state.floor5 = Object.assign({}, state.floor5, { loan: sh.querySelector("#fLoan").value.trim() || "Not started" });
-      save(); closeSheet(); render(); toast("Saved");
+      save(); closeSheet(); rerender(); toast("Saved");
     };
   });
 }
@@ -412,7 +440,7 @@ function openWish() {
       const name = sh.querySelector("#wName").value.trim(), price = Math.round(Number(sh.querySelector("#wPrice").value) || 0);
       if (!name) { sh.querySelector("#wName").focus(); return; } if (price <= 0) { sh.querySelector("#wPrice").focus(); return; }
       state.wishlist.push({ id: "w" + Date.now(), name, price, cat: sh.querySelector("#wCat").value, added: ymd(TODAY) });
-      save(); closeSheet(); render(); toast(price >= th ? `Added. Ask again in ${days} days.` : "Added. No wait needed.");
+      save(); closeSheet(); rerender(); toast(price >= th ? `Added. Ask again in ${days} days.` : "Added. No wait needed.");
     };
   });
 }
@@ -428,7 +456,7 @@ function openGear() {
       const name = sh.querySelector("#gName").value.trim(), price = Math.round(Number(sh.querySelector("#gPrice").value) || 0), fair = Math.max(1, Math.round(Number(sh.querySelector("#gFair").value) || 60));
       if (!name) { sh.querySelector("#gName").focus(); return; } if (price <= 0) { sh.querySelector("#gPrice").focus(); return; }
       state.gear.push({ id: "g" + Date.now(), name, price, uses: 0, fair });
-      save(); closeSheet(); render(); toast("Gear added");
+      save(); closeSheet(); rerender(); toast("Gear added");
     };
   });
 }
@@ -490,7 +518,7 @@ $("#settingsBtn").onclick = () => {
     <p class="note" id="loadMsg" role="status"></p>`, sh => {
     sh.querySelector("#sClose").onclick = closeSheet;
     bindDeviceBox(sh);
-    sh.querySelectorAll("[data-delrule]").forEach(b => b.onclick = () => { state.rules = state.rules.filter(r => r.id !== b.dataset.delrule); save(); closeSheet(); render(); toast("Rule removed"); });
+    sh.querySelectorAll("[data-delrule]").forEach(b => b.onclick = () => { state.rules = state.rules.filter(r => r.id !== b.dataset.delrule); save(); closeSheet(); rerender(); toast("Rule removed"); });
     const rb = sh.querySelector("#resetBtn");
     if (rb) rb.onclick = () => { if (rb.dataset.armed) { state = Object.assign(exampleState(TODAY, window.FIN_SEED), { example: APP_VERSION }); save(); DATA = loadData(); closeSheet(); render(); toast("Example data reset"); return; } rb.dataset.armed = "1"; rb.textContent = "Tap again to reset"; };
     const te = sh.querySelector("#toExample"); if (te) te.onclick = () => switchMode("example");
@@ -540,7 +568,7 @@ function deviceBox() {
     <div class="btns" style="margin-top:8px"><button class="btn sm" id="dSync">Sync now</button><button class="btn line sm" id="dDisconnect">Disconnect this device</button></div></div>`;
 }
 function afterSync(r, quiet) {
-  monthSel = monthKey(TODAY); render();
+  rerender();
   if (!quiet) toast(r.ok ? (r.state === "empty" ? "Connected. Load your state file on one device." : "Synced") : r.text || "Sync failed");
 }
 function bindDeviceBox(sh) {
@@ -551,7 +579,7 @@ function bindDeviceBox(sh) {
       const print = await connectDevice(sh.querySelector("#dRepo").value, sh.querySelector("#dToken").value, sh.querySelector("#dPass").value);
       if (readJSON(KEY_STATE)) writeMode("yours");
       msg.textContent = "Key " + print + " opened. Fetching your data.";
-      const r = await syncAll(); closeSheet(); afterSync(r);
+      const r = await syncAll(); closeSheet(); monthSel = monthKey(TODAY); afterSync(r);
     } catch (e) { c.disabled = false; msg.textContent = syncText(e); }
   };
   const u = sh.querySelector("#dUntil");
@@ -568,7 +596,11 @@ window.addEventListener("finance-sync", e => { if ($("#scrim").hidden) afterSync
 
 /* ---------- routing ---------- */
 const VIEWS = { week: renderWeek, month: renderMonth, savings: renderSavings, buying: renderBuying, sunday: renderSunday, shared: renderShared };
-function current() { const h = location.hash.replace(/^#/, ""); return VIEWS[h] ? h : "week"; }
+/* An address can name a place on the screen: #month/todo opens Month at "To categorise", #month/tx at its transactions. */
+function route() { const [v, a] = location.hash.replace(/^#/, "").split("/"); return { v: VIEWS[v] ? v : "week", a: /^[a-z]+$/.test(a || "") ? a : "" }; }
+function current() { return route().v; }
+/* Redraw the screen without moving it: after a save, a sync or a change of category. */
+function rerender() { const y = window.scrollY; render(); if (window.scrollY !== y) window.scrollTo(0, y); }
 function render() {
   const v = current();
   setDataPill();
@@ -576,7 +608,11 @@ function render() {
   const tab = v === "shared" ? "month" : v;
   document.querySelectorAll(".tabs a").forEach(a => { const on = a.dataset.tab === tab; a.classList.toggle("on", on); if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); });
 }
-window.addEventListener("hashchange", () => { closeSheet(); render(); window.scrollTo(0, 0); });
+window.addEventListener("hashchange", () => {
+  closeSheet(); render();
+  const a = route().a, el = a && document.getElementById("a-" + a);
+  if (el) el.scrollIntoView({ block: "start" }); else window.scrollTo(0, 0);
+});
 render();
 /* A connected device syncs when the app opens and when it comes back to the front after a while. */
 if (!window.FIN_NO_AUTOSYNC && connected()) {

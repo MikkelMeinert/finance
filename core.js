@@ -48,7 +48,8 @@ const DEFAULT_CATEGORIES = [
   ["media", "Streaming, media & apps", "fixed"], ["ai", "AI tools", "fixed"], ["insurance", "Insurance", "fixed"],
   ["salary", "Salary", "flow"], ["income", "Other income", "flow"], ["housing", "Housing share", "flow"],
   ["savings", "Savings & Nordnet", "flow"], ["transfer", "Own transfer", "flow"], ["giftin", "Gift received", "flow"],
-  ["boligafgift", "Boligafgift", "shared"], ["bills", "Bills", "shared"], ["loan", "Andelslån", "shared"],
+  ["boligafgift", "Boligafgift", "shared"], ["bills", "Utilities & bills", "shared"], ["loan", "Andelslån", "shared"],
+  ["sh-groceries", "Shared groceries", "shared"], ["sh-insurance", "Shared insurance", "shared"], ["sh-other", "Shared household & other", "shared"],
   ["contrib", "Brothers' payments", "sharedin"], ["partner", "Partner", "sharedin"], ["tenant", "Tenant", "sharedin"]
 ].map(([id, name, kind]) => ({ id, name, kind }));
 /* Example-only figures, round and made up. Your real plans arrive with your state file. */
@@ -184,9 +185,18 @@ const bare = s => String(s == null ? "" : s).replace(/^(?:DK-NOTA ?\S+|Forretnin
 const nameOf = t => String((t && (t.cp || bare(t.text))) || "").trim();
 
 /* ---------- state shape ---------- */
+/* Lines for things the owners buy together on the shared account (added 20 Nov 2026). A state made before then
+   gets them on load, after its other shared lines; "Bills" becomes "Utilities & bills" unless it was renamed. */
+const SHARED_LINES = DEFAULT_CATEGORIES.filter(c => c.id.startsWith("sh-"));
+function addSharedLines(cats) {
+  if (!Array.isArray(cats) || !cats.some(c => c && c.kind === "shared")) return;
+  SHARED_LINES.forEach(x => { if (!cats.some(c => c && c.id === x.id)) { let i = -1; cats.forEach((c, k) => { if (c && c.kind === "shared") i = k; }); cats.splice(i + 1, 0, Object.assign({}, x)); } });
+  const b = cats.find(c => c && c.id === "bills"); if (b && b.name === "Bills") b.name = "Utilities & bills";
+}
 function normalise(s) {
   const b = baseState();
   Object.keys(b).forEach(k => { if (s[k] == null) s[k] = b[k]; });
+  addSharedLines(s.categories);
   s.labels = Object.assign(b.labels, s.labels); s.savings = Object.assign(b.savings, s.savings);
   return s;
 }
@@ -212,6 +222,16 @@ function catOf(t) {
 }
 /* Spending is net within spending categories (a friend paying back on MobilePay reduces it).
    Uncategorised money out counts as everyday until you pick a category; uncategorised money in is ignored. */
+/* What an "always for this merchant" rule would catch: rows on the same account whose name starts with the text. */
+function ruleMatches(p, acct) {
+  const re = ruleRe(p); if (!re) return { n: 0, names: [], more: 0 };
+  const hit = TX().filter(t => (!acct || t.acct === acct) && re.test([t.cp, bare(t.text)].filter(Boolean).join(" ")));
+  const names = Array.from(new Set(hit.map(nameOf)));
+  return { n: hit.length, names: names.slice(0, 4), more: Math.max(0, names.length - 4) };
+}
+/* A first guess at the merchant part of a name: cut at the first word with a number in it (a store number,
+   a receipt code or a scrubbed number), never before the first word. "7-ELEVEN B011" gives "7-ELEVEN". */
+const ruleStem = n => { const w = String(n || "").trim().split(/\s+/), i = w.findIndex((x, k) => k > 0 && /\d|\[(?:number|account)\]/.test(x)); return (i > 0 ? w.slice(0, i) : w).join(" ").replace(/[\s*\-.,:;]+$/, ""); };
 function spendOf(t, kinds) {
   if (t.acct !== "own") return 0;
   const c = catOf(t);
@@ -512,5 +532,5 @@ function mergeState(base, local, remote) { return merge3(base || {}, local, remo
 
 
 /* Node: everything by name, plus live views of the context. */
-if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ACCOUNTS, validTx, feedToData, merge3, mergeState, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
+if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ruleMatches, ruleStem, addSharedLines, SHARED_LINES, ACCOUNTS, validTx, feedToData, merge3, mergeState, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
   state: { get: () => state }, DATA: { get: () => DATA }, TODAY: { get: () => TODAY } });
