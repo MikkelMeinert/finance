@@ -1,12 +1,12 @@
 /* Offline shell for finance.
-   - The app page and its two scripts (core.js, vault.js): network first, so a new deploy shows on the next open
+   - The app page and its three scripts (core.js, vault.js, ui.js): network first, so a new deploy shows on the next open
      and the page never runs with scripts from an older version; cached copies offline.
    - Its own static files (font, icons, manifest): cache first.
    - Never touches another origin: GitHub API calls (sync) must never be cached or answered from cache.
    - Never caches a response that isn't ok (a cached 401 once froze the training app's sync).
    Bump CACHE together with APP_VERSION in index.html on every deploy; a test checks they match. */
-const CACHE = "finance-0.3.1";
-const ASSETS = ["./", "index.html", "core.js", "vault.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png", "fonts/schibsted-grotesk-latin.woff2"];
+const CACHE = "finance-0.4.0";
+const ASSETS = ["./", "index.html", "core.js", "vault.js", "ui.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png", "fonts/schibsted-grotesk-latin.woff2"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -27,7 +27,7 @@ self.addEventListener("fetch", (e) => {
   if (/\/(callback\.(html|js)|privacy\.html|terms\.html)$/.test(new URL(req.url).pathname)) return;
 
   const isPage = req.mode === "navigate" || (req.headers.get("accept") || "").includes("text/html");
-  const isCode = /\/(core|vault)\.js$/.test(new URL(req.url).pathname);
+  const isCode = /\/(core|vault|ui)\.js$/.test(new URL(req.url).pathname);
   if (isPage || isCode) {
     e.respondWith(
       fetch(req.url, { cache: "no-cache", credentials: "same-origin" })

@@ -69,7 +69,7 @@ const GIFT_CAP = { "2026": 80600, "2027": 83000 };
 
 function baseState() {
   return {
-    v: 1, labels: { own: "Lønkonto", shared: "Shared account", brother: "Brother", partner: "Partner", tenant: "Tenant", givers: ["Giver 1", "Giver 2", "Giver 3"] },
+    v: 1, labels: { own: "Lønkonto", shared: "Shared account", budget: "Budgetkonto", brother: "Brother", partner: "Partner", tenant: "Tenant", givers: ["Giver 1", "Giver 2", "Giver 3"] },
     categories: DEFAULT_CATEGORIES.map(c => Object.assign({}, c)), rules: [], overrides: {}, ratings: {}, snoozed: {},
     wishlist: [], gear: [], subs: {}, nordnet: [], gifts: [], checkins: [],
     housingPlan: {}, savings: { bufferTarget: 25000, askCeiling: ASK_CEILING, giftCap: GIFT_CAP },
@@ -445,7 +445,68 @@ function validateState(s) {
   if (bad) return `Rule ${bad.id} has a pattern the app can't read.`;
   return null;
 }
+/* ---------- bank feed files -> the data the app works on ----------
+   feed = { tx: [doc...], balances: [doc...], pending: doc or null, status: doc or null }, each doc as the
+   feed wrote it. Public-key encryption cannot prove who wrote a file, so every row is checked and only the
+   known fields are copied. */
+const ACCOUNTS = ["own", "shared", "budget"];
+const _DAY = /^\d{4}-\d{2}-\d{2}$/;
+const validTx = t => !!t && typeof t === "object" && typeof t.id === "string" && t.id.length <= 64 && ACCOUNTS.includes(t.acct) && _DAY.test(t.date || "") &&
+  Number.isFinite(t.amount) && typeof t.text === "string" && (t.status === "BOOK" || t.status === "PDNG");
+const _row = t => ({ id: t.id, acct: t.acct, date: t.date, amount: t.amount, cur: typeof t.cur === "string" ? t.cur.slice(0, 3) : "", cp: typeof t.cp === "string" ? t.cp.slice(0, 200) : "", text: t.text.slice(0, 200), status: t.status });
+function feedToData(feed) {
+  const ids = new Set(), tx = []; let dropped = 0;
+  const rows = doc => Array.isArray(doc && doc.tx) ? doc.tx : [];
+  (feed.tx || []).forEach(doc => rows(doc).forEach(t => { if (!validTx(t) || t.status !== "BOOK") dropped++; else if (!ids.has(t.id)) { ids.add(t.id); tx.push(_row(t)); } }));
+  rows(feed.pending).forEach(t => { if (!validTx(t) || t.status !== "PDNG") dropped++; else if (!ids.has(t.id)) { ids.add(t.id); tx.push(_row(t)); } });
+  tx.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.id < b.id ? -1 : 1);
+  const history = [];
+  (feed.balances || []).forEach(doc => (Array.isArray(doc && doc.balances) ? doc.balances : []).forEach(b => {
+    if (b && ACCOUNTS.includes(b.acct) && Number.isFinite(b.amount) && _DAY.test(b.date || "")) history.push({ run: String(doc.run || ""), acct: b.acct, type: String(b.type || ""), amount: b.amount, date: b.date }); else dropped++;
+  }));
+  /* The balance of an account is its latest booked closing balance (CLBD); another type only if the bank gives no CLBD. */
+  const lastRun = history.reduce((m, b) => b.run > m ? b.run : m, ""), latest = history.filter(b => b.run === lastRun);
+  const pick = acct => { const l = latest.filter(b => b.acct === acct); return (l.find(b => b.type === "CLBD") || l[0] || null); };
+  const own = pick("own"), balances = own ? { own: own.amount, asof: own.date } : null;
+  if (balances) ["shared", "budget"].forEach(a => { const b = pick(a); if (b) balances[a] = b.amount; });
+  const st = feed.status && typeof feed.status === "object" ? feed.status : null;
+  const iso = s => typeof s === "string" && !Number.isNaN(Date.parse(s)) ? new Date(s).toISOString() : null;
+  return { tx, balances, balanceHistory: history, consentUntil: st && iso(st.consentUntil) ? iso(st.consentUntil).slice(0, 10) : null,
+    feed: st ? { ok: st.ok === true, at: iso(st.at), error: typeof st.error === "string" ? st.error.replace(/[^A-Z0-9_]/g, "").slice(0, 40) : null } : null, dropped };
+}
+
+/* ---------- merging state from two devices ----------
+   base is the state as this device last saw it in the repository, local is the device's state now, remote is
+   the repository's state now. A change made on one side only is kept. When both sides changed the same thing,
+   lists are merged item by item (by id) and the local value wins for a single value. Something deleted on
+   one side stays deleted unless the other side changed it. */
+const _KEYS = { categories: "id", rules: "id", wishlist: "id", gear: "id", nordnet: "month", checkins: c => c.date + "|" + c.kind, gifts: g => g.giver + "|" + g.date + "|" + g.amount };
+const _same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const _plain = x => !!x && typeof x === "object" && !Array.isArray(x);
+function merge3(b, l, r, key) {
+  if (_same(l, r)) return l;
+  if (_same(b, l)) return r;
+  if (_same(b, r)) return l;
+  if (Array.isArray(l) && Array.isArray(r) && key) {
+    const k = typeof key === "function" ? key : x => x && x[key], idx = list => new Map((Array.isArray(list) ? list : []).map(x => [k(x), x]));
+    const B = idx(b), L = idx(l), R = idx(r), out = [];
+    l.forEach(x => { const id = k(x); if (R.has(id)) out.push(merge3(B.get(id), x, R.get(id))); else if (!B.has(id) || !_same(B.get(id), x)) out.push(x); });   // gone remotely: keep only if new or changed here
+    const fresh = r.filter(x => !L.has(k(x)) && !B.has(k(x)));
+    const firstKnown = r.findIndex(x => L.has(k(x)) || B.has(k(x)));
+    const front = fresh.filter(x => firstKnown < 0 ? false : r.indexOf(x) < firstKnown), back = fresh.filter(x => !front.includes(x));
+    r.forEach(x => { const id = k(x); if (!L.has(id) && B.has(id) && !_same(B.get(id), x)) back.push(x); });                                                // gone here but changed remotely: keep
+    return front.concat(out, back);
+  }
+  if (_plain(l) && _plain(r)) {
+    const out = {}, bb = _plain(b) ? b : {};
+    Array.from(new Set(Object.keys(l).concat(Object.keys(r)))).forEach(kk => { const v = merge3(bb[kk], l[kk], r[kk], _KEYS[kk]); if (v !== undefined) out[kk] = v; });
+    return out;
+  }
+  return l === undefined ? r : l;
+}
+function mergeState(base, local, remote) { return merge3(base || {}, local, remote); }
+
 
 /* Node: everything by name, plus live views of the context. */
-if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
+if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ACCOUNTS, validTx, feedToData, merge3, mergeState, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
   state: { get: () => state }, DATA: { get: () => DATA }, TODAY: { get: () => TODAY } });
