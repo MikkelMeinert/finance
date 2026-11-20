@@ -71,7 +71,7 @@ const GIFT_CAP = { "2026": 80600, "2027": 83000 };
 function baseState() {
   return {
     v: 1, labels: { own: "Lønkonto", shared: "Shared account", budget: "Budgetkonto", brother: "Brother", partner: "Partner", tenant: "Tenant", givers: ["Giver 1", "Giver 2", "Giver 3"] },
-    categories: DEFAULT_CATEGORIES.map(c => Object.assign({}, c)), rules: [], overrides: {}, ratings: {}, snoozed: {},
+    categories: DEFAULT_CATEGORIES.map(c => Object.assign({}, c)), rules: [], overrides: {}, notes: {}, ratings: {}, snoozed: {},
     wishlist: [], gear: [], subs: {}, nordnet: [], gifts: [], checkins: [],
     housingPlan: {}, savings: { bufferTarget: 25000, askCeiling: ASK_CEILING, giftCap: GIFT_CAP },
     floor5: { loan: "Not started" }, settings: { wishlistThreshold: 500, coolingDays: 7 }
@@ -412,7 +412,7 @@ function buildMonthlyReview() {
   const partial = m => m + "-01" < firstDay, full = months.filter(m => m !== m0 && !partial(m)), a = from || (months[0] + "-01");
   const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
   const L = reportHeader("Monthly review", from);
-  L.push("Please look for: where spending drifts from plan and why, what changed since last time, what the savings trend means for the buffer target and the 5th floor, and one or two adjustments worth making (plans, rules, caps). Protected budgets (sport, cycling, travel) are kept by choice.", "");
+  L.push("Please look for: where spending drifts from plan and why, what changed since last time, what the savings trend means for the buffer target and the 5th floor, whether the notes below call for a new category or rule, and one or two adjustments worth making (plans, rules, caps). Protected budgets (sport, cycling, travel) are kept by choice.", "");
   // categories by month
   const spends = Object.fromEntries(months.map(m => [m, monthSpend(m, m === m0 ? TODAY.getDate() : undefined)]));
   L.push(`## Spending by category (${months.map(monthName).join(", ")}${months.includes(m0) ? "; current month to day " + TODAY.getDate() : ""})`);
@@ -451,6 +451,9 @@ function buildMonthlyReview() {
   L.push("## Cost per use", ...(state.gear.length ? state.gear.map(g => `- ${g.name}: ${krN(g.price / Math.max(1, g.uses))} kr./use over ${g.uses} uses (fair ${krN(g.fair)})`) : ["- none"]), "");
   const ideas = cutCandidates().slice(0, 3);
   L.push("## Cut candidates (high spend, low value)", ...(ideas.length ? ideas.map(x => `- ${x.cat.name}: ${krN(x.spend)} kr./month, plan ${krN(x.cat.plan || 0)}, value ${x.rating}`) : ["- none"]), "");
+  /* What went to Other, and every note: the material for adjusting the categories. */
+  const notes = state.notes || {}, noted = TX().filter(t => t.date >= a && (notes[t.id] || (catOf(t) === "other" && t.amount < 0))).sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+  L.push("## Other, and your notes since " + a, ...(noted.length ? noted.map(t => `- ${t.date} ${nameOf(t)} ${krN(-t.amount)} kr. (${catName(catOf(t))})${notes[t.id] ? ": " + String(notes[t.id]).replace(/\s+/g, " ").slice(0, 120) : ", no note"}`) : ["- none"]), "");
   const newRules = state.rules.filter(r => r.created && r.created >= a);
   L.push("## Rules you added since " + a, ...(newRules.length ? newRules.map(r => `- ${r.pattern} -> ${catName(r.cat)}`) : ["- none"]), "");
   const nn = state.nordnet.slice().sort((x, y) => x.month < y.month ? -1 : 1);

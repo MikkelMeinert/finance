@@ -10,7 +10,7 @@
    holds no personal data: a test checks this file against the seed.
    Until data is connected the app runs on generated example data.
 ===================================================================== */
-const APP_VERSION = "0.4.2";
+const APP_VERSION = "0.4.3";
 VERSION = APP_VERSION;                                   // core.js and vault.js are loaded above; they hold the logic and the storage
 TODAY = (() => { if (window.FIN_TODAY) return parseD(window.FIN_TODAY); const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); })();
 MODE = readMode();
@@ -45,7 +45,7 @@ function txRow(t) {
   if (kind === "flow") tags.push('<span class="tag">Flow</span>');
   return `<button class="row${pend ? " pending" : ""}" data-tx="${esc(t.id)}">
     <span class="main"><span class="name">${esc(nameOf(t))}</span>
-    <span class="sub">${esc(fmtDay(parseD(t.date)))} ${c ? esc(catName(c)) : ""} ${tags.join("")}</span></span>
+    <span class="sub">${esc(fmtDay(parseD(t.date)))} ${c ? esc(catName(c)) : ""} ${tags.join("")}${state.notes && state.notes[t.id] ? `<i class="tnote">${esc(state.notes[t.id])}</i>` : ""}</span></span>
     <span class="amt${t.amount > 0 ? " in" : ""}">${kr2(t.amount)}</span></button>`;
 }
 function bindTxRows(root) { root.querySelectorAll("[data-tx]").forEach(b => b.onclick = () => openTx(b.dataset.tx)); }
@@ -71,13 +71,17 @@ function openTx(id) {
       <div class="kv"><span class="k">Bank text</span><span class="v">${esc(t.text)}</span></div>
     </div>
     <div class="field"><label>Category</label><div class="catpick" id="pick">${choices.map(c => `<button data-c="${c.id}" class="${c.id === cur ? "on" : ""}">${esc(c.name)}</button>`).join("")}</div></div>
+    <div class="field"><label for="txNote">Note</label>
+      <input id="txNote" type="text" maxlength="120" autocomplete="off" value="${esc((state.notes || {})[t.id] || "")}" placeholder="What was it? Optional">
+      <span class="note" id="noteHint" ${cur === "other" ? "" : "hidden"}>Say what it was. The monthly review lists everything under Other with its note, so the categories can be adjusted.</span></div>
     <label class="check"><input type="checkbox" id="always"><span>Always use this category for this merchant<br><span class="muted small">Adds a rule. Earlier and later transactions that match follow it.</span></span></label>
     <div class="field" id="ruleBox" hidden><label for="ruleIn">Names starting with</label>
       <input id="ruleIn" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(ruleStem(nameOf(t)))}">
       <span class="note" id="ruleCount" aria-live="polite"></span></div>
     <div class="btns"><button class="btn" id="txSave">Save category</button><button class="btn quiet" id="txCancel">Cancel</button></div>`, sh => {
     let sel = cur;
-    sh.querySelectorAll("#pick button").forEach(b => b.onclick = () => { sel = b.dataset.c; sh.querySelectorAll("#pick button").forEach(x => x.classList.toggle("on", x === b)); });
+    const hint = sh.querySelector("#noteHint"), nin = sh.querySelector("#txNote"), noteWas = (state.notes || {})[t.id] || "";
+    sh.querySelectorAll("#pick button").forEach(b => b.onclick = () => { sel = b.dataset.c; sh.querySelectorAll("#pick button").forEach(x => x.classList.toggle("on", x === b)); hint.hidden = sel !== "other"; if (sel === "other" && !nin.value) nin.focus({ preventScroll: true }); });
     sh.querySelector("#txCancel").onclick = closeSheet;
     const al = sh.querySelector("#always"), box = sh.querySelector("#ruleBox"), rin = sh.querySelector("#ruleIn"), rc = sh.querySelector("#ruleCount");
     const pat = () => { const v = rin.value.trim(); return v.length >= 3 ? "^" + escRe(v) : null; };
@@ -89,7 +93,9 @@ function openTx(id) {
     al.onchange = () => { box.hidden = !al.checked; if (al.checked) count(); };
     rin.oninput = count;
     sh.querySelector("#txSave").onclick = () => {
-      if (!sel) { closeSheet(); return; }
+      const note = nin.value.replace(/\s+/g, " ").trim().slice(0, 120), noteChanged = note !== noteWas;
+      const keepNote = () => { if (!state.notes) state.notes = {}; if (note) state.notes[t.id] = note; else delete state.notes[t.id]; };
+      if (!sel) { if (noteChanged) { keepNote(); save(); closeSheet(); rerender(); toast("Note saved"); } else closeSheet(); return; }
       const always = al.checked;
       if (always) {
         const p = pat(); if (!p) { count(); rin.focus(); return; }
@@ -97,6 +103,7 @@ function openTx(id) {
         state.rules.unshift({ id: "u-" + Date.now(), pattern: p, cat: sel, acct: t.acct, created: ymd(TODAY) });
         delete state.overrides[t.id];
       } else state.overrides[t.id] = sel;
+      keepNote();
       save(); closeSheet(); rerender(); toast(always ? "Saved. Rule added for names starting with " + rin.value.trim() : "Category saved");
     };
   });
