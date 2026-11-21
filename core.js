@@ -65,15 +65,25 @@ const EXAMPLE_RULES = [
   ["spotify|apple\\.com", "media"], ["claude\\.ai", "ai"], ["djøf forsikring", "insurance"],
   ["boligafgift", "boligafgift"], ["andel energi|hiper", "bills"], ["andelsboliglån", "loan"], ["indbetaling", "contrib"]
 ].map(([pattern, cat], i) => ({ id: "ex-" + i, pattern, cat, seed: true }));
-const ASK_CEILING = { "2026": 174200, "2027": 179300 };       // public figures
-const GIFT_CAP = { "2026": 80600, "2027": 83000 };
+/* Public limits, used by the example and when a state has none. Checked 21 Nov 2026: the ASK ceiling is 174.200 until
+   the bill raising it (257.300 in 2027) passes, expected February 2027; the 2027 gift limit is not published yet. */
+const ASK_CEILING = { "2026": { amount: 174200, status: "law", asOf: "2026-11-21", note: "" }, "2027": { amount: 174200, status: "law", asOf: "2026-11-21", note: "257.300 is proposed; the bill is expected in February 2027" } };
+const GIFT_CAP = { "2026": { amount: 80600, status: "law", asOf: "2026-11-21", note: "" }, "2027": { amount: 83000, status: "estimate", asOf: "2026-11-21", note: "Not published yet; it is usually set around New Year" } };
+const LIMIT_STATUS = { law: "in force", proposed: "proposed, not law yet", estimate: "an estimate" };
+/* A limit as the state holds it: a plain number (older states) or { amount, status, asOf, note }. */
+function limitOf(map, yr) {
+  const v = map && map[yr]; if (v == null || v === "") return null;
+  if (typeof v === "number") return { amount: v, status: "", asOf: "", note: "" };
+  const a = Number(v.amount); if (!Number.isFinite(a) || a <= 0) return null;
+  return { amount: a, status: LIMIT_STATUS[v.status] ? v.status : "", asOf: /^\d{4}-\d{2}-\d{2}$/.test(v.asOf || "") ? v.asOf : "", note: typeof v.note === "string" ? v.note.slice(0, 160) : "" };
+}
 
 function baseState() {
   return {
     v: 1, labels: { own: "Lønkonto", shared: "Shared account", budget: "Budgetkonto", brother: "Brother", partner: "Partner", tenant: "Tenant", givers: ["Giver 1", "Giver 2", "Giver 3"] },
     categories: DEFAULT_CATEGORIES.map(c => Object.assign({}, c)), rules: [], overrides: {}, notes: {}, ratings: {}, snoozed: {},
     wishlist: [], gear: [], subs: {}, nordnet: [], gifts: [], checkins: [],
-    housingPlan: {}, savings: { bufferTarget: 25000, askCeiling: ASK_CEILING, giftCap: GIFT_CAP },
+    housingPlan: {}, savings: { bufferTarget: 25000, askCeiling: JSON.parse(JSON.stringify(ASK_CEILING)), giftCap: JSON.parse(JSON.stringify(GIFT_CAP)) },
     floor5: { loan: "Not started" }, settings: { wishlistThreshold: 500, coolingDays: 7 }
   };
 }
@@ -82,7 +92,7 @@ function exampleState(today, seed) {
   s.categories.forEach(c => { if (c.id in EXAMPLE_PLAN) c.plan = EXAMPLE_PLAN[c.id]; });
   s.rules = EXAMPLE_RULES.map(r => Object.assign({}, r));
   s.housingPlan = { boligafgift: 12000, bills: 2500, loan: 6500 };
-  s.savings = { bufferTarget: 25000, askCeiling: ASK_CEILING, giftCap: GIFT_CAP, fitoutShare: 240000, handover: "2027-10-01", handoverLate: "2028-01-01" };
+  s.savings = { bufferTarget: 25000, askCeiling: JSON.parse(JSON.stringify(ASK_CEILING)), giftCap: JSON.parse(JSON.stringify(GIFT_CAP)), fitoutShare: 240000, handover: "2027-10-01", handoverLate: "2028-01-01" };
   s.ratings = { [monthKey(today)]: { groceries: 3, kiosk: 1, restaurants: 2, cafes: 2, mobilepay: 2, home: 2, clothing: 2, care: 3, transport: 3, events: 3, other: 1, media: 2, ai: 2, insurance: 3 } };
   s.wishlist = [
     { id: "w1", name: "Merino cycling jersey", price: 1200, cat: "cycling", added: d(4) },
@@ -168,13 +178,23 @@ function exampleData(state, today) {
 /* ---------- transactions ----------
    The bank reports scheduled payments (standing orders, Betalingsservice) as pending with a future date.
    Those are "upcoming": known charges ahead, never counted as spent. TX() is everything else. */
-let _txSrc = null, _txDay = "", _tx = [], _up = [];
+let _txSrc = null, _txDay = "", _tx = [], _up = [], _byAmt = new Map();
 function _split() {
   const day = ymd(TODAY), all = (DATA && DATA.tx) || [];
   if (_txSrc === all && _txDay === day && _tx.length + _up.length === all.length) return;
-  _txSrc = all; _txDay = day; _tx = []; _up = [];
+  _txSrc = all; _txDay = day; _tx = []; _up = []; _byAmt = new Map();
   all.forEach(t => (t.status === "PDNG" && t.date > day ? _up : _tx).push(t));
   _up.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  _tx.forEach(t => { if (!t.amount) return; const k = Math.round(Math.abs(t.amount) * 100); if (!_byAmt.has(k)) _byAmt.set(k, []); _byAmt.get(k).push(t); });
+}
+/* A move between two of your own accounts: the same amount out of one and into another within two days.
+   Used only when no rule and no choice of yours gives the row a category, so a transfer whose text no rule knows
+   (the first one to the budget account, say) is never counted as spending. */
+function transferMate(t) {
+  if (!t || !t.amount || !CAT("transfer")) return null;
+  _split();
+  const l = _byAmt.get(Math.round(Math.abs(t.amount) * 100)) || [], d = parseD(t.date);
+  return l.find(o => o !== t && o.acct !== t.acct && Math.sign(o.amount) === -Math.sign(t.amount) && Math.abs(daysBetween(parseD(o.date), d)) <= 2) || null;
 }
 const TX = () => { _split(); return _tx; };
 const UPCOMING = () => { _split(); return _up; };
@@ -214,12 +234,15 @@ const _re = new Map();
 const _W = "[A-Za-z0-9_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u00FF]", _B = "(?:(?<=" + _W + ")(?!" + _W + ")|(?<!" + _W + ")(?=" + _W + "))";
 const ruleSource = p => String(p).replace(/\\\\|\\b/g, m => m === "\\b" ? _B : m);
 function ruleRe(p) { if (!_re.has(p)) { try { _re.set(p, new RegExp(ruleSource(p), "i")); } catch (e) { _re.set(p, null); } } return _re.get(p); }
-function catOf(t) {
-  if (state.overrides[t.id]) return state.overrides[t.id];
+/* Where a row's category comes from: your choice for that row, then the rules in order, then a matched own transfer. */
+function catSource(t) {
+  if (state.overrides[t.id]) return { cat: state.overrides[t.id], by: "you" };
   const hay = [t.cp, bare(t.text)].filter(Boolean).join(" ");
-  for (const r of state.rules) { if (r.acct && r.acct !== t.acct) continue; const re = ruleRe(r.pattern); if (re && re.test(hay)) return r.cat; }
-  return null;
+  for (const r of state.rules) { if (r.acct && r.acct !== t.acct) continue; const re = ruleRe(r.pattern); if (re && re.test(hay)) return { cat: r.cat, by: "rule", rule: r }; }
+  const mate = transferMate(t);
+  return mate ? { cat: "transfer", by: "transfer", mate } : { cat: null, by: null };
 }
+const catOf = t => catSource(t).cat;
 /* Spending is net within spending categories (a friend paying back on MobilePay reduces it).
    Uncategorised money out counts as everyday until you pick a category; uncategorised money in is ignored. */
 /* What an "always for this merchant" rule would catch: rows on the same account whose name starts with the text. */
@@ -535,5 +558,5 @@ function mergeState(base, local, remote) { return merge3(base || {}, local, remo
 
 
 /* Node: everything by name, plus live views of the context. */
-if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ruleMatches, ruleStem, addSharedLines, SHARED_LINES, ACCOUNTS, validTx, feedToData, merge3, mergeState, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
+if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ruleMatches, catSource, transferMate, limitOf, LIMIT_STATUS, ruleStem, addSharedLines, SHARED_LINES, ACCOUNTS, validTx, feedToData, merge3, mergeState, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
   state: { get: () => state }, DATA: { get: () => DATA }, TODAY: { get: () => TODAY } });

@@ -10,7 +10,7 @@
    holds no personal data: a test checks this file against the seed.
    Until data is connected the app runs on generated example data.
 ===================================================================== */
-const APP_VERSION = "0.4.3";
+const APP_VERSION = "0.4.4";
 VERSION = APP_VERSION;                                   // core.js and vault.js are loaded above; they hold the logic and the storage
 TODAY = (() => { if (window.FIN_TODAY) return parseD(window.FIN_TODAY); const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); })();
 MODE = readMode();
@@ -42,7 +42,7 @@ function txRow(t) {
   if (t.acct === "budget") tags.push(`<span class="tag">${esc(state.labels.budget)}</span>`);
   if (pend) tags.push('<span class="tag">Pending</span>');
   if (!c && t.amount < 0) tags.push('<span class="tag ask">Pick a category</span>');
-  if (kind === "flow") tags.push('<span class="tag">Flow</span>');
+  if (kind === "flow") tags.push(`<span class="tag">${catSource(t).by === "transfer" ? "Matched transfer" : "Flow"}</span>`);
   return `<button class="row${pend ? " pending" : ""}" data-tx="${esc(t.id)}">
     <span class="main"><span class="name">${esc(nameOf(t))}</span>
     <span class="sub">${esc(fmtDay(parseD(t.date)))} ${c ? esc(catName(c)) : ""} ${tags.join("")}${state.notes && state.notes[t.id] ? `<i class="tnote">${esc(state.notes[t.id])}</i>` : ""}</span></span>
@@ -58,10 +58,33 @@ function setDataPill() {
     : (TX().length ? '<span class="dot"></span>Your data' : '<span class="dot muted"></span>No bank data yet');
 }
 
+/* ---------- public limits: ASK ceiling and tax-free gift, with how sure each figure is ---------- */
+function openLimits(yr, ny) {
+  const S = state.savings, rows = [["askCeiling", yr, "ASK ceiling"], ["askCeiling", ny, "ASK ceiling"], ["giftCap", yr, "Tax-free gift per giver"], ["giftCap", ny, "Tax-free gift per giver"]];
+  const field = ([key, y, label], i) => { const l = limitOf(S[key] || (key === "askCeiling" ? ASK_CEILING : GIFT_CAP), y) || { amount: "", status: "", note: "" };
+    return `<div class="field"><label for="lA${i}">${esc(label)}, ${y} (kr.)</label><input id="lA${i}" type="number" inputmode="numeric" min="0" step="100" value="${l.amount || ""}">
+      <select id="lS${i}" aria-label="How sure, ${y}" style="margin-top:6px">${[["law", "In force"], ["proposed", "Proposed, not law yet"], ["estimate", "Estimate"], ["", "Not said"]].map(([v, n]) => `<option value="${v}"${l.status === v ? " selected" : ""}>${n}</option>`).join("")}</select>
+      <input id="lN${i}" type="text" maxlength="160" autocomplete="off" placeholder="Note, for example the proposed figure" value="${esc(l.note || "")}" style="margin-top:6px"></div>`; };
+  openSheet(`<h3>Limits</h3><p class="note">Public figures change with the law. Each one saved here is marked as checked today.</p>${rows.map(field).join("")}
+    <div class="btns"><button class="btn" id="lSave">Save limits</button><button class="btn quiet" id="lCancel">Cancel</button></div>`, sh => {
+    sh.querySelector("#lCancel").onclick = closeSheet;
+    sh.querySelector("#lSave").onclick = () => {
+      rows.forEach(([key, y], i) => {
+        const base = S[key] && typeof S[key] === "object" ? S[key] : JSON.parse(JSON.stringify(key === "askCeiling" ? ASK_CEILING : GIFT_CAP));
+        const a = Math.round(Number(sh.querySelector("#lA" + i).value) || 0), st = sh.querySelector("#lS" + i).value, note = sh.querySelector("#lN" + i).value.replace(/\s+/g, " ").trim().slice(0, 160);
+        if (a > 0) { const old = limitOf(base, y), same = old && old.amount === a && old.status === st && old.note === note; base[y] = same ? base[y] : { amount: a, status: st, asOf: ymd(TODAY), note }; }
+        else delete base[y];
+        S[key] = base;
+      });
+      save(); closeSheet(); rerender(); toast("Limits saved");
+    };
+  });
+}
+
 /* ---------- transaction sheet ---------- */
 function openTx(id) {
   const t = TX().find(x => x.id === id); if (!t) return;
-  const cur = catOf(t);
+  const src = catSource(t), cur = src.by === "transfer" ? null : src.cat;
   const choices = state.categories.filter(c => t.acct === "shared" ? ["shared", "sharedin", "flow"].includes(c.kind) : [...SPEND_KINDS, "flow"].includes(c.kind));
   openSheet(`<h3>${esc(nameOf(t))}</h3>
     <div class="panel" style="padding:4px 14px;background:var(--ground)">
@@ -70,6 +93,7 @@ function openTx(id) {
       <div class="kv"><span class="k">Account</span><span class="v">${esc(state.labels[t.acct] || state.labels.own)}</span></div>
       <div class="kv"><span class="k">Bank text</span><span class="v">${esc(t.text)}</span></div>
     </div>
+    ${src.by === "transfer" ? `<p class="note">Counted as an own transfer: the same amount ${src.mate.amount > 0 ? "arrived on" : "left"} ${esc(state.labels[src.mate.acct] || src.mate.acct)} on ${esc(fmtDay(parseD(src.mate.date)))}. Pick a category if it was something else.</p>` : ""}
     <div class="field"><label>Category</label><div class="catpick" id="pick">${choices.map(c => `<button data-c="${c.id}" class="${c.id === cur ? "on" : ""}">${esc(c.name)}</button>`).join("")}</div></div>
     <div class="field"><label for="txNote">Note</label>
       <input id="txNote" type="text" maxlength="120" autocomplete="off" value="${esc((state.notes || {})[t.id] || "")}" placeholder="What was it? Optional">
@@ -299,7 +323,11 @@ function renderShared() {
 
 function renderSavings() {
   const S = state.savings, nn = state.nordnet.slice().sort((a, c) => a.month < c.month ? 1 : -1)[0] || { ask: 0, depot: 0, askLeft: 0, month: "" };
-  const yr = String(TODAY.getFullYear()), giftCap = (S.giftCap || GIFT_CAP)[yr], askCap = (S.askCeiling || ASK_CEILING)[yr];
+  const yr = String(TODAY.getFullYear()), ny = String(+yr + 1), askMap = S.askCeiling || ASK_CEILING, giftMap = S.giftCap || GIFT_CAP;
+  const askL = limitOf(askMap, yr), giftL = limitOf(giftMap, yr), askN = limitOf(askMap, ny), giftN = limitOf(giftMap, ny);
+  const askCap = askL && askL.amount, giftCap = giftL && giftL.amount;
+  const end = x => /\.$/.test(x) ? x : x + ".";
+  const said = l => (l.status ? ", " + LIMIT_STATUS[l.status] : "") + (l.asOf ? " (checked " + esc(fmtDay(parseD(l.asOf))) + " " + l.asOf.slice(0, 4) + ")" : "") + (l.note ? ". " + esc(l.note) : "");
   const received = g => sum(state.gifts.filter(x => x.giver === g && x.date.startsWith(yr)), x => x.amount);
   const bufs = monthEndBuffers(6), target = S.bufferTarget || 0, lastBuf = bufs[bufs.length - 1];
   const bmax = Math.max(target, ...bufs.map(b => b.value || 0), 1);
@@ -327,10 +355,12 @@ function renderSavings() {
     </div></section>
   <section class="sec"><div class="sec-h"><h2>ASK room in ${yr}</h2><span class="aside">${kr(nn.askLeft || 0)} left</span></div>
     <div class="panel" style="display:flex;flex-direction:column;gap:8px">${askCap ? `<div class="track"><i style="width:${Math.min(100, Math.max(0, (askCap - (nn.askLeft || 0)) / askCap * 100))}%"></i></div>` : ""}
-    <p class="note">From Nordnet's "Samlet tilbageværende indskud".${askCap ? ` The ${yr} ceiling is ${kr(askCap)}, measured against the account's value on 31 December.` : ""}</p></div></section>
+    <p class="note">From Nordnet's "Samlet tilbageværende indskud".${askCap ? ` The ${yr} ceiling is ${end(kr(askCap) + said(askL))}` : ""}${askN ? ` In ${ny}: ${end(kr(askN.amount) + said(askN))}` : ""}</p>
+    <div class="btns"><button class="btn quiet sm" id="limBtn">Edit limits</button></div></div></section>
   <section class="sec"><div class="sec-h"><h2>Gift room in ${yr}</h2><span class="aside">${giftCap ? kr(giftCap) + " per giver" : ""}</span></div>
     <div class="panel">${state.labels.givers.map(g => { const r = received(g); return `<div class="kv"><span class="k">${esc(g)}</span><span class="v">${giftCap ? kr(giftCap - r) + " left" : "–"}${r ? `<br><span class="muted small">${kr(r)} received</span>` : ""}</span></div>`; }).join("")}
-    ${(S.giftCap || GIFT_CAP)[String(+yr + 1)] ? `<p class="note" style="margin-top:6px">In ${+yr + 1} the tax-free amount is ${kr((S.giftCap || GIFT_CAP)[String(+yr + 1)])} per giver.</p>` : ""}
+    ${giftL && (giftL.status || giftL.note) ? `<p class="note" style="margin-top:6px">${end(kr(giftL.amount) + " per giver in " + yr + said(giftL))}</p>` : ""}
+    ${giftN ? `<p class="note" style="margin-top:6px">${end("In " + ny + " the tax-free amount is " + kr(giftN.amount) + " per giver" + said(giftN))}</p>` : ""}
     <div class="btns" style="margin-top:8px"><button class="btn quiet sm" id="giftBtn">Log a gift</button></div></div></section>
   <section class="sec"><div class="sec-h"><h2>5th floor</h2><span class="aside">${S.handover ? "Handover " + esc(fmtMonth(S.handover.slice(0, 7))) + (S.handoverLate ? " to " + esc(fmtMonth(S.handoverLate.slice(0, 7))) : "") : ""}</span></div>
     <div class="panel" style="display:flex;flex-direction:column;gap:8px">
@@ -338,6 +368,7 @@ function renderSavings() {
       <div class="track"><i style="width:${need ? Math.min(100, port / need * 100) : 0}%"></i></div>
       <div class="kv"><span class="k">Loan</span><span class="v">${esc(f5.loan || "Not started")}</span></div>
       <div class="btns"><button class="btn quiet sm" id="f5Btn">Edit fit-out and loan</button></div></div></section>`;
+  $("#limBtn").onclick = () => openLimits(yr, ny);
   $("#nnBtn").onclick = () => openSheet(`<h3>Nordnet, ${MONTHS[TODAY.getMonth()]}</h3>
     <div class="field"><label for="nAsk">ASK value (kr.)</label><input id="nAsk" type="number" inputmode="numeric" value="${nn.ask || ""}"></div>
     <div class="field"><label for="nDep">Depot value (kr.)</label><input id="nDep" type="number" inputmode="numeric" value="${nn.depot || ""}"></div>
