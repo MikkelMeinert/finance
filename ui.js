@@ -1,6 +1,6 @@
 "use strict";
 /* =====================================================================
-   finance v0.3.0 (18 Nov 2026)
+   finance v0.4.5 (21 Nov 2026)
    The screens. The money logic is in core.js; storage, encryption and sync are in vault.js.
    index.html holds the markup and styling and no script of its own, so the page's content
    security policy can refuse every inline script.
@@ -10,7 +10,7 @@
    holds no personal data: a test checks this file against the seed.
    Until data is connected the app runs on generated example data.
 ===================================================================== */
-const APP_VERSION = "0.4.4";
+const APP_VERSION = "0.4.5";
 VERSION = APP_VERSION;                                   // core.js and vault.js are loaded above; they hold the logic and the storage
 TODAY = (() => { if (window.FIN_TODAY) return parseD(window.FIN_TODAY); const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); })();
 MODE = readMode();
@@ -41,6 +41,7 @@ function txRow(t) {
   if (t.acct === "shared") tags.push(`<span class="tag accent">Shared</span>`);
   if (t.acct === "budget") tags.push(`<span class="tag">${esc(state.labels.budget)}</span>`);
   if (pend) tags.push('<span class="tag">Pending</span>');
+  if (spreadOf(t) > 1) tags.push(`<span class="tag">Over ${spreadOf(t)} weeks</span>`);
   if (!c && t.amount < 0) tags.push('<span class="tag ask">Pick a category</span>');
   if (kind === "flow") tags.push(`<span class="tag">${catSource(t).by === "transfer" ? "Matched transfer" : "Flow"}</span>`);
   return `<button class="row${pend ? " pending" : ""}" data-tx="${esc(t.id)}">
@@ -59,6 +60,21 @@ function setDataPill() {
 }
 
 /* ---------- public limits: ASK ceiling and tax-free gift, with how sure each figure is ---------- */
+/* The buffer target, and how much of the investing figure goes to the buffer while it is below the target. */
+function openBuffer() {
+  const S = state.savings, fill = Number.isFinite(S.fillShare) ? S.fillShare : GUIDE.fillShare;
+  openSheet(`<h3>Buffer target</h3><p class="note">The ${esc(state.labels.own.toLowerCase())} balance the day before salary that you want to keep. While the buffer is below it, part of the investing figure goes to the buffer instead.</p>
+    <div class="field"><label for="bT">Target (kr.)</label><input id="bT" type="number" inputmode="numeric" min="0" step="500" value="${S.bufferTarget || 0}"></div>
+    <div class="field"><label for="bF">While below the target</label><select id="bF">${[[1, "All of the figure goes to the buffer"], [0.5, "Half goes to the buffer"], [0.25, "A quarter goes to the buffer"], [0, "Invest it all; the buffer waits"]].map(([v, n]) => `<option value="${v}"${fill === v ? " selected" : ""}>${n}</option>`).join("")}</select></div>
+    <div class="btns"><button class="btn" id="bSave">Save</button><button class="btn quiet" id="bCancel">Cancel</button></div>`, sh => {
+    sh.querySelector("#bCancel").onclick = closeSheet;
+    sh.querySelector("#bSave").onclick = () => {
+      state.savings.bufferTarget = Math.max(0, Math.round(Number(sh.querySelector("#bT").value) || 0));
+      state.savings.fillShare = Number(sh.querySelector("#bF").value); state.savings.bufferSetAt = ymd(TODAY);
+      save(); closeSheet(); rerender(); toast("Buffer target saved");
+    };
+  });
+}
 function openLimits(yr, ny) {
   const S = state.savings, rows = [["askCeiling", yr, "ASK ceiling"], ["askCeiling", ny, "ASK ceiling"], ["giftCap", yr, "Tax-free gift per giver"], ["giftCap", ny, "Tax-free gift per giver"]];
   const field = ([key, y, label], i) => { const l = limitOf(S[key] || (key === "askCeiling" ? ASK_CEILING : GIFT_CAP), y) || { amount: "", status: "", note: "" };
@@ -98,6 +114,9 @@ function openTx(id) {
     <div class="field"><label for="txNote">Note</label>
       <input id="txNote" type="text" maxlength="120" autocomplete="off" value="${esc((state.notes || {})[t.id] || "")}" placeholder="What was it? Optional">
       <span class="note" id="noteHint" ${cur === "other" ? "" : "hidden"}>Say what it was. The monthly review lists everything under Other with its note, so the categories can be adjusted.</span></div>
+    ${t.acct === "own" && t.amount < 0 ? `<div class="field"><label for="txSpread">In the weekly number</label>
+      <select id="txSpread">${Array.from({ length: SPREAD_MAX }, (_, i) => i + 1).map(n => `<option value="${n}"${spreadOf(t) === n ? " selected" : ""}>${n === 1 ? "All in its own week" : "Spread over " + n + " weeks, " + krN(-t.amount / n) + " kr. a week"}</option>`).join("")}</select>
+      <span class="note">For a prepayment, such as a team that runs for several weeks. The month still counts it on its date.</span></div>` : ""}
     <label class="check"><input type="checkbox" id="always"><span>Always use this category for this merchant<br><span class="muted small">Adds a rule. Earlier and later transactions that match follow it.</span></span></label>
     <div class="field" id="ruleBox" hidden><label for="ruleIn">Names starting with</label>
       <input id="ruleIn" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(ruleStem(nameOf(t)))}">
@@ -119,16 +138,18 @@ function openTx(id) {
     sh.querySelector("#txSave").onclick = () => {
       const note = nin.value.replace(/\s+/g, " ").trim().slice(0, 120), noteChanged = note !== noteWas;
       const keepNote = () => { if (!state.notes) state.notes = {}; if (note) state.notes[t.id] = note; else delete state.notes[t.id]; };
-      if (!sel) { if (noteChanged) { keepNote(); save(); closeSheet(); rerender(); toast("Note saved"); } else closeSheet(); return; }
+      const spIn = sh.querySelector("#txSpread"), spN = spIn ? Math.round(Number(spIn.value)) || 1 : spreadOf(t), spreadChanged = spN !== spreadOf(t);
+      const keepSpread = () => { if (!spIn) return; if (!state.spread) state.spread = {}; if (spN > 1) state.spread[t.id] = spN; else delete state.spread[t.id]; };
+      if (!sel) { if (noteChanged || spreadChanged) { keepNote(); keepSpread(); save(); closeSheet(); rerender(); toast(noteChanged ? "Note saved" : "Saved"); } else closeSheet(); return; }
       const always = al.checked;
       if (always) {
         const p = pat(); if (!p) { count(); rin.focus(); return; }
         state.rules = state.rules.filter(r => !(r.pattern === p && (r.acct || t.acct) === t.acct));
         state.rules.unshift({ id: "u-" + Date.now(), pattern: p, cat: sel, acct: t.acct, created: ymd(TODAY) });
         delete state.overrides[t.id];
-      } else state.overrides[t.id] = sel;
-      keepNote();
-      save(); closeSheet(); rerender(); toast(always ? "Saved. Rule added for names starting with " + rin.value.trim() : "Category saved");
+      } else if (sel !== cur || src.by !== "rule") state.overrides[t.id] = sel;      // the rule's own category is not pinned as your choice
+      keepNote(); keepSpread();
+      save(); closeSheet(); rerender(); toast(always ? "Saved. Rule added for names starting with " + rin.value.trim() : sel === cur && src.by === "rule" ? "Saved" : "Category saved");
     };
   });
 }
@@ -342,7 +363,7 @@ function renderSavings() {
     <div class="fig"><span class="k">ASK</span><span class="v">${kr(nn.ask || 0)}</span><span class="s">${esc(nnWhen)}</span></div>
     <div class="fig"><span class="k">Depot</span><span class="v">${kr(nn.depot || 0)}</span><span class="s">${esc(nnWhen)}</span></div>
   </div>
-  <div class="btns"><button class="btn quiet sm" id="nnBtn">Update Nordnet</button></div>
+  <div class="btns"><button class="btn quiet sm" id="nnBtn">Update Nordnet</button><button class="btn quiet sm" id="limBtn">Edit limits</button><button class="btn quiet sm" id="bufBtn">Buffer target</button></div>
   <section class="sec"><div class="sec-h"><h2>Buffer at month-end</h2><span class="aside">Target ${kr(target)}</span></div>
     <div class="panel" style="display:flex;flex-direction:column;gap:10px">
       ${bufs.length ? `<p class="bignote">The ${esc(state.labels.own.toLowerCase())} held <b>${kr(lastBuf.value)}</b> the day before salary on ${esc(fmtDay(parseD(lastBuf.payday)))}.</p>
@@ -355,8 +376,7 @@ function renderSavings() {
     </div></section>
   <section class="sec"><div class="sec-h"><h2>ASK room in ${yr}</h2><span class="aside">${kr(nn.askLeft || 0)} left</span></div>
     <div class="panel" style="display:flex;flex-direction:column;gap:8px">${askCap ? `<div class="track"><i style="width:${Math.min(100, Math.max(0, (askCap - (nn.askLeft || 0)) / askCap * 100))}%"></i></div>` : ""}
-    <p class="note">From Nordnet's "Samlet tilbageværende indskud".${askCap ? ` The ${yr} ceiling is ${end(kr(askCap) + said(askL))}` : ""}${askN ? ` In ${ny}: ${end(kr(askN.amount) + said(askN))}` : ""}</p>
-    <div class="btns"><button class="btn quiet sm" id="limBtn">Edit limits</button></div></div></section>
+    <p class="note">From Nordnet's "Samlet tilbageværende indskud".${askCap ? ` The ${yr} ceiling is ${end(kr(askCap) + said(askL))}` : ""}${askN ? ` In ${ny}: ${end(kr(askN.amount) + said(askN))}` : ""}</p></div></section>
   <section class="sec"><div class="sec-h"><h2>Gift room in ${yr}</h2><span class="aside">${giftCap ? kr(giftCap) + " per giver" : ""}</span></div>
     <div class="panel">${state.labels.givers.map(g => { const r = received(g); return `<div class="kv"><span class="k">${esc(g)}</span><span class="v">${giftCap ? kr(giftCap - r) + " left" : "–"}${r ? `<br><span class="muted small">${kr(r)} received</span>` : ""}</span></div>`; }).join("")}
     ${giftL && (giftL.status || giftL.note) ? `<p class="note" style="margin-top:6px">${end(kr(giftL.amount) + " per giver in " + yr + said(giftL))}</p>` : ""}
@@ -369,6 +389,7 @@ function renderSavings() {
       <div class="kv"><span class="k">Loan</span><span class="v">${esc(f5.loan || "Not started")}</span></div>
       <div class="btns"><button class="btn quiet sm" id="f5Btn">Edit fit-out and loan</button></div></div></section>`;
   $("#limBtn").onclick = () => openLimits(yr, ny);
+  $("#bufBtn").onclick = () => openBuffer();
   $("#nnBtn").onclick = () => openSheet(`<h3>Nordnet, ${MONTHS[TODAY.getMonth()]}</h3>
     <div class="field"><label for="nAsk">ASK value (kr.)</label><input id="nAsk" type="number" inputmode="numeric" value="${nn.ask || ""}"></div>
     <div class="field"><label for="nDep">Depot value (kr.)</label><input id="nDep" type="number" inputmode="numeric" value="${nn.depot || ""}"></div>
@@ -574,7 +595,14 @@ function loadStateText(text) {
   const err = validateState(s); if (err) return { ok: false, error: err };
   const prev = MODE === "yours" ? readJSON(KEY_STATE) : null;
   const next = normalise(Object.assign(baseState(), s));
-  if (prev) ["overrides", "ratings", "snoozed", "wishlist", "gear", "subs", "gifts", "checkins"].forEach(k => { if (prev[k] && !s[k]) next[k] = prev[k]; });  // a fresh seed keeps what you've done
+  if (prev) ["overrides", "notes", "spread", "decisions", "ratings", "snoozed", "wishlist", "gear", "subs", "gifts", "checkins"].forEach(k => { if (prev[k] && !s[k]) next[k] = prev[k]; });  // a fresh seed keeps what you've done
+  /* and the figures you set in the app: limits you marked (law, proposed, estimate) and the buffer choices */
+  const pS = prev && prev.savings;
+  if (pS) {
+    ["askCeiling", "giftCap"].forEach(k => { if (pS[k] && typeof pS[k] === "object") Object.entries(pS[k]).forEach(([y, v]) => { if (v && typeof v === "object" && v.status) next.savings[k] = Object.assign({}, next.savings[k], { [y]: v }); }); });
+    if (pS.bufferSetAt) ["bufferTarget", "fillShare", "bufferSetAt"].forEach(k => { if (pS[k] != null) next.savings[k] = pS[k]; });
+    if (Number.isFinite(pS.order)) next.savings.order = pS.order;
+  }
   if (prev) next.rules = (prev.rules || []).filter(r => !r.seed).concat(next.rules.filter(r => r.seed !== false));
   writeJSON(KEY_STATE, next); switchMode("yours", true); save();     // save() marks it for the next sync when this device is connected
   return { ok: true, summary: `${next.categories.filter(c => SPEND_KINDS.includes(c.kind)).length} categories, ${next.rules.length} rules` };

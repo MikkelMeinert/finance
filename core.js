@@ -81,8 +81,8 @@ function limitOf(map, yr) {
 function baseState() {
   return {
     v: 1, labels: { own: "Lønkonto", shared: "Shared account", budget: "Budgetkonto", brother: "Brother", partner: "Partner", tenant: "Tenant", givers: ["Giver 1", "Giver 2", "Giver 3"] },
-    categories: DEFAULT_CATEGORIES.map(c => Object.assign({}, c)), rules: [], overrides: {}, notes: {}, ratings: {}, snoozed: {},
-    wishlist: [], gear: [], subs: {}, nordnet: [], gifts: [], checkins: [],
+    categories: DEFAULT_CATEGORIES.map(c => Object.assign({}, c)), rules: [], overrides: {}, notes: {}, spread: {}, ratings: {}, snoozed: {},
+    wishlist: [], gear: [], subs: {}, nordnet: [], gifts: [], checkins: [], decisions: [],
     housingPlan: {}, savings: { bufferTarget: 25000, askCeiling: JSON.parse(JSON.stringify(ASK_CEILING)), giftCap: JSON.parse(JSON.stringify(GIFT_CAP)) },
     floor5: { loan: "Not started" }, settings: { wishlistThreshold: 500, coolingDays: 7 }
   };
@@ -271,7 +271,30 @@ const planTotal = () => plannedKinds(SPEND_KINDS);
    next weeks until underspending pays it back. Underspending never builds credit:
    it stays on the lønkonto and becomes buffer. */
 const weekAllowance = () => plannedKinds(WEEK_KINDS) * 12 / 52;
-function weekSpend(mon) { const a = ymd(mon), b = ymd(addDays(mon, 6)); return sum(TX().filter(t => inRange(t, a, b)), t => spendOf(t, WEEK_KINDS)); }
+/* A prepayment (a five-week team, a season pass) can be spread over 2 to 12 weeks from its own week: state.spread
+   holds the number of weeks by transaction id. The week then counts amount ÷ weeks in each of those weeks, on the
+   payment's own day in the first week and on Monday after that. Months still count it on its date. */
+const SPREAD_MAX = 12;
+const spreadOf = t => { const n = Math.round(Number(((state && state.spread) || {})[t.id])); return n >= 2 && n <= SPREAD_MAX ? n : 1; };
+function spreadInfo(t) {
+  const n = spreadOf(t); if (n < 2) return null;
+  const first = mondayOf(parseD(t.date));
+  return { n, weekly: spendOf(t, WEEK_KINDS) / n, first, last: addDays(first, 7 * (n - 1)) };
+}
+function daySpend(ds) {
+  let s = 0;
+  TX().forEach(t => {
+    const n = spreadOf(t);
+    if (n === 1) { if (t.date === ds) s += spendOf(t, WEEK_KINDS); return; }
+    if (t.date === ds) { s += spendOf(t, WEEK_KINDS) / n; return; }
+    const d = parseD(ds); if (dow(d) !== 0 || ds < t.date) return;
+    const k = daysBetween(mondayOf(parseD(t.date)), d) / 7;
+    if (k >= 1 && k < n) s += spendOf(t, WEEK_KINDS) / n;
+  });
+  return s;
+}
+const spreadActive = (a, b) => TX().map(t => Object.assign({ t }, spreadInfo(t))).filter(x => x.n && ymd(x.first) <= b && ymd(x.last) >= a);
+function weekSpend(mon) { let s = 0; for (let i = 0; i < 7; i++) s += daySpend(ymd(addDays(mon, i))); return s; }
 function firstMonday() {
   const dates = TX().map(t => t.date).sort();
   const start = state.trackingStart || dates[0];
@@ -286,7 +309,7 @@ function carryInto(mon) {
 function weekStatus(today) {
   const mon = mondayOf(today), sun = addDays(mon, 6), a = ymd(mon), b = ymd(sun), A = weekAllowance();
   const { debt, hist } = carryInto(mon);
-  const spentByDay = Array.from({ length: 7 }, (_, i) => sum(TX().filter(t => t.date === ymd(addDays(mon, i))), t => spendOf(t, WEEK_KINDS)));
+  const spentByDay = Array.from({ length: 7 }, (_, i) => daySpend(ymd(addDays(mon, i))));
   const spent = sum(spentByDay, x => x), dayIdx = dow(today);
   return { mon, sun, a, b, allowance: A, carried: debt, spentByDay, spent, left: A - debt - spent, dayIdx,
     pace: A * (dayIdx + 1) / 7, hist,
@@ -332,6 +355,109 @@ function monthEndBuffers(n) {
   return pays.slice(-n).map(p => ({ date: ymd(addDays(parseD(p), -1)), payday: p, value: ownBalanceAt(ymd(addDays(parseD(p), -1))) }));
 }
 
+/* ---------- investing guidance (information, not advice; the app never moves money) ----------
+   Capacity is measured from cash, per pay cycle (payday to the day before the next payday), so it works before the
+   rules are any good. A cycle's surplus is what it left on the lønkonto and the budgetkonto plus what went to Nordnet:
+   salary, less housing, less everything else. Housing counts in the cycle of the month it pays for, whichever side of
+   payday it lands. Gifts and other one-off income are left out (they go to the lump-sum sweep); one-off spending stays
+   in, because there is always another one. Spending is the part that is learned: it starts at the plan and moves
+   toward what the cycles show with weight n ÷ (n + 3). Income and housing come from the bank for the phase you are in,
+   and later phases add the model's changes to them. */
+const GUIDE = { priorCycles: 3, priorSpread: 0.15, step: 250, lookback: 12, raiseAfter: 3, raiseBy: 500, lowerAfter: 2, fillShare: 0.5, drawdown: 0.2 };
+const median = a => { if (!a.length) return null; const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const madOf = a => a.length ? median(a.map(x => Math.abs(x - median(a)))) * 1.4826 : 0;
+const stepDown = x => Math.floor(x / GUIDE.step) * GUIDE.step;
+const paydays = () => Array.from(new Set(TX().filter(t => t.acct === "own" && t.amount > 0 && t.status === "BOOK" && catOf(t) === "salary").map(t => t.date))).sort();
+/* Complete cycles only: a cycle is complete when the month it pays for is over, so both housing payments are in. */
+function payCycles() {
+  const pays = paydays(), out = [], today = ymd(TODAY);
+  for (let i = 0; i + 1 < pays.length; i++) {
+    const from = pays[i], to = ymd(addDays(parseD(pays[i + 1]), -1)), cover = shiftMonth(from.slice(0, 7), 1);
+    if (today <= cover + "-" + pad(daysIn(cover))) continue;
+    let salary = 0, saved = 0, other = 0; const lumps = [];
+    TX().filter(t => (t.acct === "own" || t.acct === "budget") && t.status === "BOOK" && inRange(t, from, to)).forEach(t => {
+      const c = catOf(t);
+      if (c === "housing") return;
+      if (c === "salary") salary += t.amount;
+      else if (c === "savings") saved -= t.amount;
+      else if (t.amount > 0 && (c === "giftin" || c === "income")) lumps.push(t);
+      else other += t.amount;
+    });
+    const housing = -sum(TX().filter(t => t.acct === "own" && t.status === "BOOK" && catOf(t) === "housing" && t.date.startsWith(cover)), t => t.amount);
+    out.push({ from, to, cover, salary, housing, spending: -other, surplus: salary + other - housing, saved,
+      lumps: sum(lumps, t => t.amount), lumpRows: lumps, trough: DATA.balances ? ownBalanceAt(to) : null });
+  }
+  return out;
+}
+/* The model's phases, from the seed: [{ from: "YYYY-MM", label, net, housing, saving, fromLate? }]. */
+function phaseList() {
+  const P = ((state.savings || {}).phases || []).filter(p => p && /^\d{4}-\d{2}$/.test(p.from) && Number.isFinite(p.net) && Number.isFinite(p.housing));
+  return P.slice().sort((a, b) => a.from < b.from ? -1 : a.from > b.from ? 1 : 0);
+}
+const phaseAt = (P, mk) => P.filter(p => p.from <= mk).pop() || P[0] || null;
+/* The figures as they stand after the cycles in cs, for month mk. Pure apart from state (plans, phases, floor). */
+function capacityFrom(cs, mk) {
+  const S = state.savings || {}, P = phaseList(), n = cs.length, w = n / (n + GUIDE.priorCycles), prior = planTotal();
+  const obs = n ? median(cs.map(c => c.spending)) : null, spend = n ? (1 - w) * prior + w * obs : prior;
+  const ws = n >= 3 ? w : 0, spread = (1 - ws) * prior * GUIDE.priorSpread + ws * madOf(cs.map(c => c.spending));
+  const last = cs[n - 1] || null, base = last ? phaseAt(P, last.cover) : phaseAt(P, mk);
+  const net0 = n ? median(cs.slice(-3).map(c => c.salary)) : (base ? base.net : 0), housing0 = last ? last.housing : (base ? base.housing : 0);
+  const path = (P.length ? P.filter(p => p === phaseAt(P, mk) || p.from > mk) : [null]).map(p => {
+    const net = net0 + (p && base ? p.net - base.net : 0), housing = housing0 + (p && base ? p.housing - base.housing : 0), capacity = net - housing - spend;
+    return { from: p ? p.from : mk, fromLate: p && p.fromLate || null, label: p ? p.label || p.from : "Now", net, housing, spend, capacity, conservative: stepDown(capacity - spread) };
+  });
+  const floor = Number(S.bufferTarget) || 0, fill = Number.isFinite(S.fillShare) ? Math.min(1, Math.max(0, S.fillShare)) : GUIDE.fillShare;
+  const trough = last ? last.trough : null, now = path[0];
+  const topUp = trough != null && trough < floor ? Math.min(floor - trough, Math.max(0, now.conservative) * fill) : 0;
+  return { n, weight: w, prior, observed: obs, spend, spread, net: net0, housing: housing0, path, floor, trough, topUp,
+    investable: Math.max(0, stepDown(now.conservative - topUp)) };
+}
+/* The current standing order to Nordnet: state.savings.order when set, else what the last cycles sent there. */
+function standingOrder(cs) {
+  const S = state.savings || {};
+  if (Number.isFinite(S.order)) return S.order;
+  const r = cs.slice(-3).map(c => c.saved - (c.lumps > 0 ? Math.min(c.saved, c.lumps) : 0));   // a gift passed on to Nordnet is not the order
+  return r.length ? median(r) : 0;
+}
+function guidance() {
+  const all = payCycles(), mk = monthKey(TODAY), S = state.savings || {}, W = GUIDE.lookback;
+  const now = capacityFrom(all.slice(-W), mk), order = standingOrder(all);
+  const hist = all.map((c, i) => { const g = capacityFrom(all.slice(Math.max(0, i + 1 - W), i + 1), c.cover); return { cover: c.cover, investable: g.investable, trough: c.trough }; });
+  /* Hysteresis: raise only after three cycles in a row that beat the order by 500; lower after two that fall short,
+     or two with the buffer under the floor and falling. At most one suggestion at a time. */
+  let suggest = null;
+  const up = hist.slice(-GUIDE.raiseAfter), dn = hist.slice(-GUIDE.lowerAfter);
+  if (up.length === GUIDE.raiseAfter && up.every(h => h.investable >= order + GUIDE.raiseBy)) suggest = { kind: "raise", to: Math.min(...up.map(h => h.investable)) };
+  else if (dn.length === GUIDE.lowerAfter && order > 0 && dn.every(h => h.investable < order)) suggest = { kind: "lower", to: dn[dn.length - 1].investable };
+  else if (dn.length === GUIDE.lowerAfter && order > 0 && dn.every(h => h.trough != null && h.trough < now.floor) && dn[1].trough < dn[0].trough) suggest = { kind: "lower", to: Math.max(0, stepDown(order / 2)), why: "buffer" };
+  const ahead = now.path.slice(1).find(p => p.from <= shiftMonth(mk, 3) && Math.max(0, p.conservative) < order);
+  const phaseWarning = ahead ? { from: ahead.from, label: ahead.label, to: Math.max(0, ahead.conservative), draw: Math.max(0, -ahead.conservative) } : null;
+  /* Lump sums: one-off money in the last cycle, ASK first up to the room left, the rest to the depot. */
+  const nn = (state.nordnet || []).slice().sort((a, b) => a.month < b.month ? -1 : 1).pop() || {}, lastC = all[all.length - 1];
+  const room = Number.isFinite(nn.askLeft) ? nn.askLeft : null;
+  const sweep = lastC && lastC.lumps > 0 ? { amount: lastC.lumps, toAsk: room == null ? null : Math.min(lastC.lumps, room), toDepot: room == null ? null : Math.max(0, lastC.lumps - room), room } : null;
+  return { cycles: all, hist, now, order, suggest, phaseWarning, sweep, fitout: fitout(now, nn), learning: all.length < GUIDE.raiseAfter, decisionsDue: decisionsDue() };
+}
+/* The fit-out at handover: ASK and depot now, plus the guidance amount each month until then (no growth assumed),
+   against your share. What is left is the loan; also shown if markets are 20 % down at handover. */
+function fitout(now, nn) {
+  const S = state.savings || {}, need = Number(S.fitoutShare) || 0, mk = monthKey(TODAY);
+  if (!need || !S.handover) return null;
+  const portfolio = (Number(nn.ask) || 0) + (Number(nn.depot) || 0), P = now.path;
+  const at = end => {
+    let add = 0;
+    for (let m = shiftMonth(mk, 1); m < end; m = shiftMonth(m, 1)) {
+      const p = P.filter(x => x.from <= m).pop() || P[0];
+      add += p === P[0] ? now.investable : Math.max(0, p.conservative);
+    }
+    const value = portfolio + add, down = value * (1 - GUIDE.drawdown);
+    return { month: end, added: add, value, loan: Math.max(0, need - value), loanIfDown: Math.max(0, need - down) };
+  };
+  return { need, portfolio, base: at(S.handover.slice(0, 7)), late: S.handoverLate ? at(S.handoverLate.slice(0, 7)) : null };
+}
+/* A decisions journal: { id, date, text, review, outcome }. A decision is due when its review date has come. */
+const decisionsDue = () => (state.decisions || []).filter(d => d && d.review && d.review <= ymd(TODAY) && !d.outcome);
+
 /* ---------- recurring, ratings, ideas ---------- */
 function recurring() {
   const groups = {};
@@ -355,7 +481,7 @@ function recurring() {
 }
 function latestRatings() { const out = {}; Object.keys(state.ratings).sort().forEach(m => Object.assign(out, state.ratings[m])); return out; }
 const IDEAS = {
-  kiosk: "Kiosk runs add up through frequency, not size. Two a week fits the plan; keep a snack in the bag for the rest.",
+  kiosk: "This one adds up through how often, not how much. Pick a lower count a week, hold it for a month, then lower the plan to match.",
   restaurants: "Restaurants and cafés share one pot in the plan. Keep the evenings with people; trim the solo takeaway.",
   cafes: "Restaurants and cafés share one pot in the plan. A thermos on two workdays covers most of the gap.",
   mobilepay: "MobilePay to friends is mostly shared bills. Settle the regular ones less often and it gets easier to see.",
@@ -419,6 +545,8 @@ function buildWeeklyReport() {
   const L = reportHeader("Weekly check-in", from);
   L.push("## Weeks", ...weeksTable(from), "");
   L.push(`This week so far: ${krN(w.spent)} of ${krN(w.allowance)} kr., ${krN(w.carried)} carried in, ${w.pending} pending card payments.`, "");
+  const sp = spreadActive(a, ymd(w.sun));
+  if (sp.length) L.push("## Spread over weeks", ...sp.map(x => `- ${x.t.date} ${nameOf(x.t)} ${krN(-x.t.amount)} kr. over ${x.n} weeks: ${krN(x.weekly)} a week, weeks ${isoWeek(x.first)} to ${isoWeek(x.last)}`), "");
   const soon = upcomingWithin(7);
   L.push(`Scheduled by the bank in the next 7 days: ${soon.length ? soon.length + (soon.length > 1 ? " payments, " : " payment, ") + krN(-sum(soon, t => t.amount)) + " kr" : "none"}.`, "");
   L.push("## Unusual", ...(unus.length ? unus.map(u => `- ${u.t.date} ${nameOf(u.t)} ${krN(-u.t.amount)} kr.: ${u.why}`) : ["- none"]), ...newRec.map(r => `- new recurring: ${r.name} ${krN(r.amount)} kr.`), "");
@@ -530,7 +658,7 @@ function feedToData(feed) {
    the repository's state now. A change made on one side only is kept. When both sides changed the same thing,
    lists are merged item by item (by id) and the local value wins for a single value. Something deleted on
    one side stays deleted unless the other side changed it. */
-const _KEYS = { categories: "id", rules: "id", wishlist: "id", gear: "id", nordnet: "month", checkins: c => c.date + "|" + c.kind, gifts: g => g.giver + "|" + g.date + "|" + g.amount };
+const _KEYS = { categories: "id", rules: "id", wishlist: "id", gear: "id", nordnet: "month", decisions: "id", checkins: c => c.date + "|" + c.kind, gifts: g => g.giver + "|" + g.date + "|" + g.amount };
 const _same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const _plain = x => !!x && typeof x === "object" && !Array.isArray(x);
 function merge3(b, l, r, key) {
@@ -558,5 +686,5 @@ function mergeState(base, local, remote) { return merge3(base || {}, local, remo
 
 
 /* Node: everything by name, plus live views of the context. */
-if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, catName, bare, ruleSource, ruleMatches, catSource, transferMate, limitOf, LIMIT_STATUS, ruleStem, addSharedLines, SHARED_LINES, ACCOUNTS, validTx, feedToData, merge3, mergeState, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
+if (typeof module !== "undefined" && module.exports) module.exports = Object.defineProperties({ use, GUIDE, median, madOf, paydays, payCycles, phaseList, phaseAt, capacityFrom, standingOrder, guidance, fitout, decisionsDue, spreadOf, spreadInfo, spreadActive, daySpend, SPREAD_MAX, catName, bare, ruleSource, ruleMatches, catSource, transferMate, limitOf, LIMIT_STATUS, ruleStem, addSharedLines, SHARED_LINES, ACCOUNTS, validTx, feedToData, merge3, mergeState, ASK_CEILING, CAT, DEFAULT_CATEGORIES, DOW, EXAMPLE_PLAN, EXAMPLE_RULES, EX_SHOPS, EX_START, GIFT_CAP, IDEAS, MON, MONTHS, SPEND_KINDS, TX, UPCOMING, WEEK_KINDS, addDays, baseState, buildMonthlyReview, buildWeeklyReport, carryInto, catOf, cumulative, cutCandidates, daysBetween, daysIn, dow, escRe, exampleData, exampleState, firstMonday, flowsOf, fmtDay, fmtMonth, hashStr, inRange, isFirstSundayOfMonth, isoWeek, kindOf, kr, kr2, krN, lastCheckin, latestRatings, merchantKey, mergeSeed, mondayOf, monthEndBuffers, monthKey, monthName, monthSpend, monthStart, nameOf, nf0, nf2, normalise, ownBalanceAt, pad, parseD, pct, planOf, planTotal, plannedKinds, recurring, reportHeader, rng, ruleRe, sharedMonth, shiftMonth, spendOf, sum, sundayData, unusual, upcomingWithin, validateState, weekAllowance, weekSpend, weekStatus, weeksTable, wishState, ymd }, {
   state: { get: () => state }, DATA: { get: () => DATA }, TODAY: { get: () => TODAY } });
